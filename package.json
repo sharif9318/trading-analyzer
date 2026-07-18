@@ -1,0 +1,39 @@
+{
+  "name": "trading-analyzer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only XM MT5 market-data bridge and NestJS ingestion API",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "nest build",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:prod": "node dist/main.js",
+    "test": "pnpm build && node --test test/*.test.js",
+    "test:analysis": "pnpm build && node --test test/analysis.test.js",
+    "test:quality": "pnpm build && node --test test/session-quality.test.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@nestjs/common": "11.1.28",
+    "@nestjs/config": "4.0.4",
+    "@nestjs/core": "11.1.28",
+    "@nestjs/platform-express": "11.1.28",
+    "@nestjs/typeorm": "11.0.3",
+    "class-transformer": "0.5.1",
+    "class-validator": "0.15.1",
+    "pg": "8.22.0",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "typeorm": "1.1.0"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "11.0.24",
+    "@types/node": "26.1.1",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@11.7.0"
+}
