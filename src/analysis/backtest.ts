@@ -52,19 +52,31 @@ export function runTrendPullbackBacktest(input: BacktestInput) {
     index = Math.max(index + 1, simulated.exitIndex);
   }
 
+  const inSampleTrades = trades.filter((trade) => trade.entryTime < splitTime);
+  const outOfSampleTrades = trades.filter((trade) => trade.entryTime >= splitTime);
+  const chronologicalFolds = buildChronologicalFolds(
+    trades,
+    m15,
+    input.config.riskPerTradePercent,
+  );
+  const profitableFolds = chronologicalFolds.filter(
+    (fold) => fold.metrics.averageNetR > 0 && (fold.metrics.profitFactor ?? 0) > 1,
+  ).length;
+
   return {
     symbol: input.symbol,
     splitTime,
-    conclusion: conclusionFor(trades.filter((trade) => trade.entryTime >= splitTime)),
+    conclusion: classifyConclusion(
+      inSampleTrades,
+      outOfSampleTrades,
+      profitableFolds,
+      chronologicalFolds.length,
+    ),
+    profitableFolds,
+    chronologicalFolds,
     all: summarizeTrades(trades, input.config.riskPerTradePercent),
-    inSample: summarizeTrades(
-      trades.filter((trade) => trade.entryTime < splitTime),
-      input.config.riskPerTradePercent,
-    ),
-    outOfSample: summarizeTrades(
-      trades.filter((trade) => trade.entryTime >= splitTime),
-      input.config.riskPerTradePercent,
-    ),
+    inSample: summarizeTrades(inSampleTrades, input.config.riskPerTradePercent),
+    outOfSample: summarizeTrades(outOfSampleTrades, input.config.riskPerTradePercent),
     trades,
   };
 }
@@ -252,12 +264,56 @@ function hasTrendFeatures(row: FeatureRow | null): row is FeatureRow & {
   return row !== null && row.ema20 !== null && row.ema50 !== null && row.ema200 !== null;
 }
 
-function conclusionFor(outOfSampleTrades: Trade[]) {
+export function classifyConclusion(
+  inSampleTrades: Trade[],
+  outOfSampleTrades: Trade[],
+  profitableFolds: number,
+  totalFolds: number,
+) {
   if (outOfSampleTrades.length < 30) return 'insufficient-out-of-sample-trades';
-  const expectancy =
+  const inSampleExpectancy = inSampleTrades.length
+    ? inSampleTrades.reduce((sum, trade) => sum + trade.netR, 0) /
+      inSampleTrades.length
+    : 0;
+  const outOfSampleExpectancy =
     outOfSampleTrades.reduce((sum, trade) => sum + trade.netR, 0) /
     outOfSampleTrades.length;
-  return expectancy > 0 ? 'promising-not-validated' : 'baseline-failed';
+
+  if (outOfSampleExpectancy <= 0) return 'baseline-failed';
+  if (
+    inSampleExpectancy <= 0 ||
+    profitableFolds < Math.ceil(totalFolds * 0.6)
+  ) {
+    return 'unstable-regime-dependent';
+  }
+  return 'promising-not-validated';
+}
+
+function buildChronologicalFolds(
+  trades: Trade[],
+  m15: FeatureRow[],
+  riskPerTradePercent: number,
+) {
+  const foldCount = 5;
+  return Array.from({ length: foldCount }, (_, index) => {
+    const startIndex = Math.floor((m15.length * index) / foldCount);
+    const endIndex = Math.floor((m15.length * (index + 1)) / foldCount);
+    const startTime = m15[startIndex]?.openTime ?? 0;
+    const endTime =
+      index === foldCount - 1
+        ? Number.POSITIVE_INFINITY
+        : (m15[endIndex]?.openTime ?? Number.POSITIVE_INFINITY);
+    const foldTrades = trades.filter(
+      (trade) => trade.entryTime >= startTime && trade.entryTime < endTime,
+    );
+
+    return {
+      fold: index + 1,
+      startTime,
+      endTime: Number.isFinite(endTime) ? endTime : null,
+      metrics: summarizeTrades(foldTrades, riskPerTradePercent),
+    };
+  });
 }
 
 function round(value: number): number {

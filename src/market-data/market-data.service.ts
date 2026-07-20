@@ -1,10 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
+import { spreadBps } from '../analysis/spreads';
 import { CandleQueryDto } from './dto/candle-query.dto';
 import { HistoricalBackfillDto } from './dto/historical-backfill.dto';
 import { MarketSnapshotBatchDto } from './dto/market-snapshot.dto';
+import { SpreadBackfillDto } from './dto/spread-backfill.dto';
 import { MarketCandleEntity } from './entities/market-candle.entity';
+import { SpreadObservationEntity } from './entities/spread-observation.entity';
 
 export interface StoredSnapshot {
   symbol: string;
@@ -31,6 +34,8 @@ export class MarketDataService {
   constructor(
     @InjectRepository(MarketCandleEntity)
     private readonly candles: Repository<MarketCandleEntity>,
+    @InjectRepository(SpreadObservationEntity)
+    private readonly spreads: Repository<SpreadObservationEntity>,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -71,12 +76,54 @@ export class MarketDataService {
 
     const inserted = Array.isArray(result.raw) ? result.raw.length : 0;
 
+    const spreadRows = batch.snapshots
+      .filter(
+        (snapshot) =>
+          snapshot.bid > 0 &&
+          snapshot.ask >= snapshot.bid &&
+          snapshot.tickTime > 0,
+      )
+      .map((snapshot) =>
+        this.spreads.create({
+          source: batch.source,
+          server: batch.server,
+          symbol: snapshot.symbol,
+          timeframe: batch.timeframe,
+          bucketOpenTime: String(
+            Math.floor(
+              snapshot.tickTime / this.timeframeSeconds(batch.timeframe),
+            ) * this.timeframeSeconds(batch.timeframe),
+          ),
+          observedAtMsc: String(snapshot.tickTime * 1000),
+          bid: snapshot.bid,
+          ask: snapshot.ask,
+          spreadBps: spreadBps(snapshot.bid, snapshot.ask),
+          batchGeneratedAt: String(batch.generatedAt),
+          ingestionKind: 'live',
+        }),
+      );
+
+    const spreadResult = spreadRows.length
+      ? await this.spreads
+          .createQueryBuilder()
+          .insert()
+          .into(SpreadObservationEntity)
+          .values(spreadRows)
+          .orIgnore()
+          .returning(['id'])
+          .execute()
+      : null;
+    const spreadObservationsInserted = Array.isArray(spreadResult?.raw)
+      ? spreadResult.raw.length
+      : 0;
+
     return {
       received: batch.snapshots.length,
       inserted,
       duplicates: batch.snapshots.length - inserted,
       symbols: batch.snapshots.map((snapshot) => snapshot.symbol),
       generatedAt: batch.generatedAt,
+      spreadObservationsInserted,
       receivedAt: new Date().toISOString(),
     };
   }
@@ -120,6 +167,54 @@ export class MarketDataService {
       received: batch.candles.length,
       inserted,
       duplicates: batch.candles.length - inserted,
+    };
+  }
+
+  async backfillSpreads(batch: SpreadBackfillDto) {
+    const invalid = batch.observations.find(
+      (observation) =>
+        observation.ask < observation.bid ||
+        observation.tickTimeMsc < observation.bucketOpenTime * 1000,
+    );
+    if (invalid) {
+      throw new BadRequestException(
+        'Spread observations require ask >= bid and tick time at/after bucket open',
+      );
+    }
+
+    const rows = batch.observations.map((observation) =>
+      this.spreads.create({
+        source: batch.source,
+        server: batch.server,
+        symbol: batch.symbol,
+        timeframe: batch.timeframe,
+        bucketOpenTime: String(observation.bucketOpenTime),
+        observedAtMsc: String(observation.tickTimeMsc),
+        bid: observation.bid,
+        ask: observation.ask,
+        spreadBps: spreadBps(observation.bid, observation.ask),
+        batchGeneratedAt: String(batch.generatedAt),
+        ingestionKind: 'historical-tick',
+      }),
+    );
+
+    const result = await this.spreads
+      .createQueryBuilder()
+      .insert()
+      .into(SpreadObservationEntity)
+      .values(rows)
+      .orIgnore()
+      .returning(['id'])
+      .execute();
+    const inserted = Array.isArray(result.raw) ? result.raw.length : 0;
+
+    return {
+      symbol: batch.symbol,
+      timeframe: batch.timeframe,
+      received: batch.observations.length,
+      inserted,
+      duplicates: batch.observations.length - inserted,
+      ingestionKind: 'historical-tick',
     };
   }
 
@@ -215,5 +310,11 @@ export class MarketDataService {
       timeframe: row.timeframe,
       receivedAt: row.receivedAt.toISOString(),
     };
+  }
+
+  private timeframeSeconds(timeframe: string): number {
+    if (timeframe === 'PERIOD_H4') return 4 * 60 * 60;
+    if (timeframe === 'PERIOD_H1') return 60 * 60;
+    return 15 * 60;
   }
 }

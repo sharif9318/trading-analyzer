@@ -70,7 +70,7 @@ export class BacktestService {
 
     return {
       generatedAt: new Date().toISOString(),
-      strategy: 'multi-timeframe-trend-pullback-v1',
+      strategy: 'multi-timeframe-trend-pullback-v1.1',
       purpose: 'baseline-falsification-not-trading-advice',
       config: {
         ...config,

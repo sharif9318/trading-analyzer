@@ -1,8 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { latestClosedFeature } = require('../dist/analysis/alignment');
-const { resolveBarExit } = require('../dist/analysis/backtest');
+const { classifyConclusion, resolveBarExit } = require('../dist/analysis/backtest');
 const { atr, ema, rsi } = require('../dist/analysis/indicators');
+const { spreadBps, summarizeSpreadObservations } = require('../dist/analysis/spreads');
 
 function candle(openTime, overrides = {}) {
   return {
@@ -58,4 +59,63 @@ test('same-bar stop and target collision resolves to stop', () => {
     price: 108,
     reason: 'stop',
   });
+});
+
+function trade(netR, entryTime = 0) {
+  return {
+    symbol: 'TEST',
+    direction: 'long',
+    signalTime: entryTime - 900,
+    entryTime,
+    exitTime: entryTime + 900,
+    entryPrice: 1,
+    exitPrice: 1,
+    stopPrice: 0.9,
+    targetPrice: 1.2,
+    holdingBars: 1,
+    exitReason: 'timeout',
+    grossR: netR,
+    netR,
+  };
+}
+
+test('positive holdout cannot hide a negative earlier regime', () => {
+  const inSample = Array.from({ length: 100 }, () => trade(-0.1));
+  const outOfSample = Array.from({ length: 40 }, () => trade(0.1));
+  assert.equal(
+    classifyConclusion(inSample, outOfSample, 2, 5),
+    'unstable-regime-dependent',
+  );
+});
+
+test('spread calibration reports midpoint-relative basis points', () => {
+  assert.ok(Math.abs(spreadBps(0.9999, 1.0001) - 2) < 1e-9);
+  const report = summarizeSpreadObservations(
+    [1, 2, 3, 4].map((value) => ({
+      symbol: 'TEST',
+      bid: 1,
+      ask: 1 + value / 10000,
+      observedAt: value,
+    })),
+    4,
+  );
+  assert.equal(report.status, 'ready');
+  assert.ok(report.medianBps > 1.9 && report.medianBps < 2.1);
+  assert.ok(report.p95Bps > 3.9 && report.p95Bps < 4.1);
+});
+
+test('spread calibration excludes zero and crossed quotes', () => {
+  const report = summarizeSpreadObservations(
+    [
+      { symbol: 'TEST', bid: 1, ask: 1.0002, observedAt: 1 },
+      { symbol: 'TEST', bid: 0, ask: 0, observedAt: 2 },
+      { symbol: 'TEST', bid: 1.0002, ask: 1, observedAt: 3 },
+    ],
+    2,
+  );
+
+  assert.equal(report.samples, 1);
+  assert.equal(report.status, 'collecting');
+  assert.equal(report.oldestObservedAt, 1);
+  assert.equal(report.newestObservedAt, 1);
 });

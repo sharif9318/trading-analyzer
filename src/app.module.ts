@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AnalysisModule } from './analysis/analysis.module';
 import { AddHistoricalIngestion1784343600000 } from './database/migrations/1784343600000-add-historical-ingestion';
 import { CreateMarketCandles1784340000000 } from './database/migrations/1784340000000-create-market-candles';
+import { CreateSpreadObservations1784682000000 } from './database/migrations/1784682000000-create-spread-observations';
 import { MarketDataModule } from './market-data/market-data.module';
 
 @Module({
@@ -20,6 +21,7 @@ import { MarketDataModule } from './market-data/market-data.module';
         migrations: [
           CreateMarketCandles1784340000000,
           AddHistoricalIngestion1784343600000,
+          CreateSpreadObservations1784682000000,
         ],
         retryAttempts: 10,
         retryDelay: 3000,

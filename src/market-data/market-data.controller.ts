@@ -14,6 +14,7 @@ import { CandleQueryDto } from './dto/candle-query.dto';
 import { HistoricalBackfillDto } from './dto/historical-backfill.dto';
 import { MarketSnapshotBatchDto } from './dto/market-snapshot.dto';
 import { QualityQueryDto } from './dto/quality-query.dto';
+import { SpreadBackfillDto } from './dto/spread-backfill.dto';
 import { MarketDataService } from './market-data.service';
 import { DataQualityService } from './quality/data-quality.service';
 
@@ -67,6 +68,16 @@ export class MarketDataController {
   ) {
     this.assertBridgeKey(bridgeKey);
     return this.marketDataService.backfill(batch);
+  }
+
+  @Post('spread-backfill')
+  @HttpCode(202)
+  async spreadBackfill(
+    @Headers('x-bridge-key') bridgeKey: string | undefined,
+    @Body() batch: SpreadBackfillDto,
+  ) {
+    this.assertBridgeKey(bridgeKey);
+    return this.marketDataService.backfillSpreads(batch);
   }
 
   @Get('coverage')

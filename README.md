@@ -1,4 +1,4 @@
-# Trading Analyzer — Phase 5
+# Trading Analyzer — Phase 5.2
 
 This is a read-only XM MetaTrader 5 to NestJS market-data pipeline. The live EA
 publishes newly closed candles, a separate MT5 script imports history, and
@@ -10,7 +10,9 @@ There is no order placement, position sizing, OpenAI call, or real-money
 trading code in this phase.
 
 Phase 5 adds a deterministic research backtest. It is a fixed baseline for
-falsification, not a recommendation engine.
+falsification, not a recommendation engine. Phase 5.2 adds idempotent
+historical XM tick-spread backfill so execution-cost research does not depend
+on waiting weeks for live samples.
 
 ## Architecture
 
@@ -224,6 +226,84 @@ Interpretation rules:
 - `baseline-failed`: the fixed hypothesis failed after costs;
 - `promising-not-validated`: eligible for further walk-forward and cost
   sensitivity testing, never immediate live trading.
+- `unstable-regime-dependent`: earlier and later periods disagree, so the
+  apparent recent edge is rejected until proven across additional regimes.
+
+Each symbol also returns five chronological fold summaries. A strategy needs
+positive results across at least three of five folds before it can receive the
+`promising-not-validated` label.
+
+## 8. Collect and calibrate actual spreads
+
+Attach a second `MultiSymbolBridge` EA instance to another chart with:
+
+- `SymbolsCsv`: `EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF,USDCAD`
+- `AnalysisTimeframe`: `PERIOD_M15`
+- the same backend URL and bridge key;
+- `TimerSeconds`: `10`.
+
+Keep the existing H1 instance running. After at least 100 new M15 observations
+per symbol, inspect midpoint-relative spread costs:
+
+```bash
+curl -s 'http://127.0.0.1:3001/analysis/spreads?timeframe=PERIOD_M15&minimumSamples=100' | python3 -m json.tool
+```
+
+Median, 75th-percentile, and 95th-percentile spread basis points are reported
+separately. `collecting` means there is not enough evidence yet.
+
+The spread report reads from a dedicated `spread_observations` table. On the
+first Phase 5.2 application start, the database migration copies existing live
+bid/ask observations into that table. New live snapshot batches continue to
+populate it automatically.
+
+## 9. Backfill historical XM tick spreads
+
+The historical spread importer is a separate MT5 script. It requests broker
+tick history in small time chunks, keeps the first valid bid/ask tick in each
+M15 bucket, and uploads only those compact observations. It does not upload
+every raw tick and does not place orders.
+
+1. In MT5 choose **File -> Open Data Folder**.
+2. Open `MQL5/Scripts`.
+3. Copy `mt5/HistoricalSpreadBackfill.mq5` into that folder.
+4. Open the copied file in MetaEditor and press **Compile**.
+5. Return to MT5 and refresh **Navigator -> Scripts**.
+6. Drag `HistoricalSpreadBackfill` onto any chart.
+
+Recommended first run:
+
+- `BackendUrl`: `http://127.0.0.1:3001/market-data/spread-backfill`
+- `BridgeApiKey`: the exact value in `.env`
+- `SymbolsCsv`: `EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF,USDCAD`
+- `DaysBack`: `30`
+- `ChunkHours`: `6`
+- `BatchSize`: `200`
+- `RequestDelayMs`: `100`
+
+The first `CopyTicksRange` request may pause while MT5 synchronizes its local
+tick database with the XM server. Available history is controlled by the
+broker. The script logs completed and failed symbols and then exits. Rerunning
+it is safe because the database has one unique observation per source, server,
+symbol, timeframe, and M15 bucket.
+
+Verify historical and live provenance separately:
+
+```bash
+docker compose exec postgres psql \
+  -U trading_analyzer \
+  -d trading_analyzer \
+  -c "SELECT symbol, ingestion_kind, count(*) FROM spread_observations GROUP BY symbol, ingestion_kind ORDER BY symbol, ingestion_kind;"
+```
+
+Then inspect the combined calibration:
+
+```bash
+curl -s 'http://127.0.0.1:3001/analysis/spreads?timeframe=PERIOD_M15&minimumSamples=1000' | python3 -m json.tool
+```
+
+Each symbol includes `samplesByIngestionKind` so a report cannot hide whether
+its evidence came from live collection or historical ticks.
 
 Run all deterministic tests with:
 
@@ -262,5 +342,7 @@ deliberately intend to delete all stored candles.
 - Pooled trade statistics are not a portfolio simulation and do not model
   simultaneous exposure or cross-pair correlation.
 - Historical execution costs are assumed rather than reconstructed from tick
-  spreads. Cost-sensitivity testing is required.
+  spreads until the Phase 5.2 tick importer has completed successfully.
+- Broker tick-history depth is not guaranteed. A successful API response does
+  not prove that every requested historical interval was available.
 - No approved live signals, notifications, position sizing, or orders exist.
