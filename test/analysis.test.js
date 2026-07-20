@@ -1,7 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { latestClosedFeature } = require('../dist/analysis/alignment');
-const { classifyConclusion, resolveBarExit } = require('../dist/analysis/backtest');
+const {
+  brokerHour,
+  classifyConclusion,
+  resolveBarExit,
+  summarizeCostCoverage,
+  transactionCostR,
+} = require('../dist/analysis/backtest');
+const { BacktestService } = require('../dist/analysis/backtest.service');
 const { atr, ema, rsi } = require('../dist/analysis/indicators');
 const { spreadBps, summarizeSpreadObservations } = require('../dist/analysis/spreads');
 
@@ -61,7 +68,7 @@ test('same-bar stop and target collision resolves to stop', () => {
   });
 });
 
-function trade(netR, entryTime = 0) {
+function trade(netR, entryTime = 0, overrides = {}) {
   return {
     symbol: 'TEST',
     direction: 'long',
@@ -74,8 +81,19 @@ function trade(netR, entryTime = 0) {
     targetPrice: 1.2,
     holdingBars: 1,
     exitReason: 'timeout',
+    costBps: 2,
+    costSource: 'fixed',
+    costR: 0,
+    brokerHour: brokerHour(entryTime),
+    marketContext: {
+      atrPercent: 0.1,
+      m15Rsi14: 50,
+      h1EmaSeparationPercent: 0.1,
+      h4EmaSeparationPercent: 0.2,
+    },
     grossR: netR,
     netR,
+    ...overrides,
   };
 }
 
@@ -86,6 +104,67 @@ test('positive holdout cannot hide a negative earlier regime', () => {
     classifyConclusion(inSample, outOfSample, 2, 5),
     'unstable-regime-dependent',
   );
+});
+
+test('transaction cost is converted from basis points into stop-risk units', () => {
+  assert.ok(Math.abs(transactionCostR(1, 2, 0.001) - 0.2) < 1e-12);
+});
+
+test('historical spread coverage rejects a backtest below the configured gate', () => {
+  const trades = [
+    trade(0.1, 0, { costSource: 'historical-spread' }),
+    trade(0.1, 900, { costSource: 'historical-spread' }),
+    trade(0.1, 1800, { costSource: 'fallback-p75' }),
+  ];
+  const coverage = summarizeCostCoverage(trades, 'historical-spread', 95);
+
+  assert.equal(coverage.matched, 2);
+  assert.equal(coverage.fallback, 1);
+  assert.equal(coverage.matchPercent, 66.6667);
+  assert.equal(coverage.status, 'insufficient');
+});
+
+test('broker-hour diagnostic uses the timestamp hour consistently', () => {
+  const timestamp = Date.UTC(2026, 0, 1, 13, 30, 0) / 1000;
+  assert.equal(brokerHour(timestamp), 13);
+});
+
+test('historical cost resolver matches exact buckets and labels P75 fallback', async () => {
+  const spreadRepository = {
+    find: async () => [
+      {
+        bucketOpenTime: '0',
+        spreadBps: 1,
+        ingestionKind: 'historical-tick',
+      },
+      {
+        bucketOpenTime: '900',
+        spreadBps: 2,
+        ingestionKind: 'live',
+      },
+    ],
+  };
+  const service = new BacktestService({}, spreadRepository);
+  const dynamicCost = await service.buildHistoricalCostResolver(
+    'TEST',
+    'XM-MT5',
+    'TEST-SERVER',
+    [candle(0), candle(900), candle(1800)],
+  );
+
+  assert.deepEqual(dynamicCost.resolver(0), {
+    costBps: 1,
+    source: 'historical-spread',
+  });
+  assert.deepEqual(dynamicCost.resolver(900), {
+    costBps: 2,
+    source: 'live-spread',
+  });
+  assert.deepEqual(dynamicCost.resolver(1800), {
+    costBps: 2,
+    source: 'fallback-p75',
+  });
+  assert.equal(dynamicCost.metadata.fallbackP75Bps, 2);
 });
 
 test('spread calibration reports midpoint-relative basis points', () => {

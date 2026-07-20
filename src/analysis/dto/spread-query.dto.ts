@@ -10,6 +10,6 @@ export class SpreadQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(20)
-  @Max(5000)
+  @Max(50000)
   minimumSamples = 100;
 }

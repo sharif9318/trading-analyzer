@@ -16,9 +16,22 @@ export interface FeatureRow extends Candle {
 }
 
 export type Direction = 'long' | 'short';
+export type CostModel = 'fixed' | 'historical-spread';
+export type CostSource =
+  | 'fixed'
+  | 'historical-spread'
+  | 'live-spread'
+  | 'fallback-p75';
+
+export interface CostResolution {
+  costBps: number;
+  source: CostSource;
+}
 
 export interface BacktestConfig {
+  costModel: CostModel;
   costBps: number;
+  minimumSpreadMatchPercent: number;
   stopAtr: number;
   rewardRisk: number;
   maxHoldingBars: number;
@@ -38,6 +51,16 @@ export interface Trade {
   targetPrice: number;
   holdingBars: number;
   exitReason: 'stop' | 'target' | 'timeout' | 'end-of-data';
+  costBps: number;
+  costSource: CostSource;
+  costR: number;
+  brokerHour: number;
+  marketContext: {
+    atrPercent: number;
+    m15Rsi14: number;
+    h1EmaSeparationPercent: number;
+    h4EmaSeparationPercent: number;
+  };
   grossR: number;
   netR: number;
 }

@@ -3,6 +3,7 @@ import { buildFeatures } from './indicators';
 import {
   BacktestConfig,
   Candle,
+  CostResolution,
   Direction,
   FeatureRow,
   Trade,
@@ -18,6 +19,15 @@ export interface BacktestInput {
   h1: Candle[];
   h4: Candle[];
   config: BacktestConfig;
+  costResolver?: (entryTime: number) => CostResolution;
+}
+
+interface SignalDecision {
+  direction: Direction;
+  atrPercent: number;
+  m15Rsi14: number;
+  h1EmaSeparationPercent: number;
+  h4EmaSeparationPercent: number;
 }
 
 export function runTrendPullbackBacktest(input: BacktestInput) {
@@ -42,6 +52,7 @@ export function runTrendPullbackBacktest(input: BacktestInput) {
       m15,
       index,
       input.config,
+      input.costResolver,
     );
     if (!simulated) {
       index++;
@@ -62,21 +73,33 @@ export function runTrendPullbackBacktest(input: BacktestInput) {
   const profitableFolds = chronologicalFolds.filter(
     (fold) => fold.metrics.averageNetR > 0 && (fold.metrics.profitFactor ?? 0) > 1,
   ).length;
+  const costCoverage = summarizeCostCoverage(
+    trades,
+    input.config.costModel,
+    input.config.minimumSpreadMatchPercent,
+  );
+  const statisticalConclusion = classifyConclusion(
+    inSampleTrades,
+    outOfSampleTrades,
+    profitableFolds,
+    chronologicalFolds.length,
+  );
 
   return {
     symbol: input.symbol,
     splitTime,
-    conclusion: classifyConclusion(
-      inSampleTrades,
-      outOfSampleTrades,
-      profitableFolds,
-      chronologicalFolds.length,
-    ),
+    conclusion:
+      costCoverage.status === 'insufficient'
+        ? 'insufficient-spread-coverage'
+        : statisticalConclusion,
+    statisticalConclusion,
+    costCoverage,
     profitableFolds,
     chronologicalFolds,
     all: summarizeTrades(trades, input.config.riskPerTradePercent),
     inSample: summarizeTrades(inSampleTrades, input.config.riskPerTradePercent),
     outOfSample: summarizeTrades(outOfSampleTrades, input.config.riskPerTradePercent),
+    diagnostics: buildDiagnostics(trades, input.config.riskPerTradePercent),
     trades,
   };
 }
@@ -88,6 +111,12 @@ export function summarizeTrades(trades: Trade[], riskPerTradePercent: number) {
   const grossLoss = Math.abs(losses.reduce((sum, trade) => sum + trade.netR, 0));
   const averageNetR = trades.length
     ? trades.reduce((sum, trade) => sum + trade.netR, 0) / trades.length
+    : 0;
+  const averageGrossR = trades.length
+    ? trades.reduce((sum, trade) => sum + trade.grossR, 0) / trades.length
+    : 0;
+  const averageCostR = trades.length
+    ? trades.reduce((sum, trade) => sum + trade.costR, 0) / trades.length
     : 0;
 
   let equity = 1;
@@ -107,6 +136,8 @@ export function summarizeTrades(trades: Trade[], riskPerTradePercent: number) {
     wins: wins.length,
     losses: losses.length,
     winRatePercent: round(trades.length ? (wins.length / trades.length) * 100 : 0),
+    averageGrossR: round(averageGrossR),
+    averageCostR: round(averageCostR),
     averageNetR: round(averageNetR),
     profitFactor: grossLoss === 0 ? null : round(grossProfit / grossLoss),
     totalReturnPercent: round((equity - 1) * 100),
@@ -145,7 +176,7 @@ function detectSignal(
   h1: FeatureRow[],
   h4: FeatureRow[],
   index: number,
-): Direction | null {
+): SignalDecision | null {
   const current = m15[index];
   const decisionTime = current.openTime + M15_SECONDS;
   const h1Row = latestClosedFeature(h1, decisionTime, H1_SECONDS);
@@ -178,17 +209,31 @@ function detectSignal(
     current.rsi14 >= 30 &&
     current.rsi14 <= 55;
 
-  if (longRegime && longTrigger) return 'long';
-  if (shortRegime && shortTrigger) return 'short';
-  return null;
+  const direction = longRegime && longTrigger
+    ? 'long'
+    : shortRegime && shortTrigger
+      ? 'short'
+      : null;
+  if (!direction) return null;
+
+  return {
+    direction,
+    atrPercent: (current.atr14 / current.close) * 100,
+    m15Rsi14: current.rsi14,
+    h1EmaSeparationPercent:
+      (Math.abs(h1Row.ema20 - h1Row.ema50) / h1Row.close) * 100,
+    h4EmaSeparationPercent:
+      (Math.abs(h4Row.ema50 - h4Row.ema200) / h4Row.close) * 100,
+  };
 }
 
 function simulateTrade(
   symbol: string,
-  direction: Direction,
+  decision: SignalDecision,
   m15: FeatureRow[],
   signalIndex: number,
   config: BacktestConfig,
+  costResolver?: (entryTime: number) => CostResolution,
 ): { trade: Trade; exitIndex: number } | null {
   const signal = m15[signalIndex];
   const entryIndex = signalIndex + 1;
@@ -196,6 +241,7 @@ function simulateTrade(
   if (!entryBar || signal.atr14 === null || signal.atr14 <= 0) return null;
 
   const entryPrice = entryBar.open;
+  const direction = decision.direction;
   const stopDistance = signal.atr14 * config.stopAtr;
   const stopPrice =
     direction === 'long' ? entryPrice - stopDistance : entryPrice + stopDistance;
@@ -225,8 +271,12 @@ function simulateTrade(
 
   const directionMultiplier = direction === 'long' ? 1 : -1;
   const grossR = (directionMultiplier * (exitPrice - entryPrice)) / stopDistance;
-  const roundTripCost = entryPrice * (config.costBps / 10000);
-  const netR = grossR - roundTripCost / stopDistance;
+  const cost = costResolver?.(entryBar.openTime) ?? {
+    costBps: config.costBps,
+    source: 'fixed' as const,
+  };
+  const costR = transactionCostR(entryPrice, cost.costBps, stopDistance);
+  const netR = grossR - costR;
 
   return {
     exitIndex,
@@ -242,10 +292,169 @@ function simulateTrade(
       targetPrice,
       holdingBars: exitIndex - entryIndex + 1,
       exitReason,
+      costBps: round(cost.costBps),
+      costSource: cost.source,
+      costR: round(costR),
+      brokerHour: brokerHour(entryBar.openTime),
+      marketContext: {
+        atrPercent: round(decision.atrPercent),
+        m15Rsi14: round(decision.m15Rsi14),
+        h1EmaSeparationPercent: round(decision.h1EmaSeparationPercent),
+        h4EmaSeparationPercent: round(decision.h4EmaSeparationPercent),
+      },
       grossR: round(grossR),
       netR: round(netR),
     },
   };
+}
+
+export function transactionCostR(
+  entryPrice: number,
+  costBps: number,
+  stopDistance: number,
+): number {
+  if (entryPrice <= 0 || costBps < 0 || stopDistance <= 0) return Number.NaN;
+  return (entryPrice * (costBps / 10000)) / stopDistance;
+}
+
+export function brokerHour(timestamp: number): number {
+  return new Date(timestamp * 1000).getUTCHours();
+}
+
+export function summarizeCostCoverage(
+  trades: Trade[],
+  costModel: BacktestConfig['costModel'],
+  minimumMatchPercent: number,
+) {
+  const matched = trades.filter(
+    (trade) =>
+      trade.costSource === 'historical-spread' ||
+      trade.costSource === 'live-spread',
+  ).length;
+  const fallback = trades.filter(
+    (trade) => trade.costSource === 'fallback-p75',
+  ).length;
+  const fixed = trades.filter((trade) => trade.costSource === 'fixed').length;
+  const matchPercent = trades.length ? (matched / trades.length) * 100 : 0;
+
+  return {
+    costModel,
+    trades: trades.length,
+    matched,
+    fallback,
+    fixed,
+    matchPercent: round(matchPercent),
+    minimumMatchPercent,
+    status:
+      costModel === 'fixed'
+        ? 'not-applicable'
+        : matchPercent >= minimumMatchPercent
+          ? 'sufficient'
+          : 'insufficient',
+  };
+}
+
+function buildDiagnostics(trades: Trade[], riskPerTradePercent: number) {
+  const winningTrades = trades.filter((trade) => trade.netR > 0);
+  const losingTrades = trades.filter((trade) => trade.netR <= 0);
+  const hours = [...new Set(trades.map((trade) => trade.brokerHour))].sort(
+    (left, right) => left - right,
+  );
+
+  return {
+    byDirection: {
+      long: summarizeTrades(
+        trades.filter((trade) => trade.direction === 'long'),
+        riskPerTradePercent,
+      ),
+      short: summarizeTrades(
+        trades.filter((trade) => trade.direction === 'short'),
+        riskPerTradePercent,
+      ),
+    },
+    byBrokerHour: hours.map((hour) => ({
+      brokerHour: hour,
+      metrics: summarizeTrades(
+        trades.filter((trade) => trade.brokerHour === hour),
+        riskPerTradePercent,
+      ),
+    })),
+    spreadCostBps: {
+      all: summarizeNumbers(trades.map((trade) => trade.costBps)),
+      winners: summarizeNumbers(winningTrades.map((trade) => trade.costBps)),
+      losses: summarizeNumbers(losingTrades.map((trade) => trade.costBps)),
+    },
+    marketContext: {
+      all: summarizeMarketContext(trades),
+      winners: summarizeMarketContext(winningTrades),
+      losses: summarizeMarketContext(losingTrades),
+    },
+  };
+}
+
+function summarizeNumbers(values: number[]) {
+  if (!values.length) {
+    return {
+      samples: 0,
+      average: null,
+      minimum: null,
+      median: null,
+      p75: null,
+      p95: null,
+      maximum: null,
+    };
+  }
+
+  const sorted = [...values].sort((left, right) => left - right);
+  const average = sorted.reduce((sum, value) => sum + value, 0) / sorted.length;
+
+  return {
+    samples: sorted.length,
+    average: round(average),
+    minimum: round(sorted[0]),
+    median: round(percentile(sorted, 0.5)),
+    p75: round(percentile(sorted, 0.75)),
+    p95: round(percentile(sorted, 0.95)),
+    maximum: round(sorted[sorted.length - 1]),
+  };
+}
+
+function summarizeMarketContext(trades: Trade[]) {
+  if (!trades.length) {
+    return {
+      trades: 0,
+      averageAtrPercent: null,
+      averageM15Rsi14: null,
+      averageH1EmaSeparationPercent: null,
+      averageH4EmaSeparationPercent: null,
+    };
+  }
+
+  const average = (selector: (trade: Trade) => number) =>
+    trades.reduce((sum, trade) => sum + selector(trade), 0) / trades.length;
+
+  return {
+    trades: trades.length,
+    averageAtrPercent: round(average((trade) => trade.marketContext.atrPercent)),
+    averageM15Rsi14: round(average((trade) => trade.marketContext.m15Rsi14)),
+    averageH1EmaSeparationPercent: round(
+      average((trade) => trade.marketContext.h1EmaSeparationPercent),
+    ),
+    averageH4EmaSeparationPercent: round(
+      average((trade) => trade.marketContext.h4EmaSeparationPercent),
+    ),
+  };
+}
+
+function percentile(sortedValues: number[], percentileRank: number): number {
+  const index = Math.max(
+    0,
+    Math.min(
+      sortedValues.length - 1,
+      Math.ceil(percentileRank * sortedValues.length) - 1,
+    ),
+  );
+  return sortedValues[index];
 }
 
 function hasEntryFeatures(row: FeatureRow): row is FeatureRow & {

@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsInt,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -29,11 +30,22 @@ export class BacktestRequestDto {
   maxM15Bars = 10000;
 
   @IsOptional()
+  @IsIn(['fixed', 'historical-spread'])
+  costModel: 'fixed' | 'historical-spread' = 'fixed';
+
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   @Max(20)
   costBps = 2;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(50)
+  @Max(100)
+  minimumSpreadMatchPercent = 95;
 
   @IsOptional()
   @Type(() => Number)

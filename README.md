@@ -1,4 +1,4 @@
-# Trading Analyzer — Phase 5.2
+# Trading Analyzer — Phase 5.3
 
 This is a read-only XM MetaTrader 5 to NestJS market-data pipeline. The live EA
 publishes newly closed candles, a separate MT5 script imports history, and
@@ -12,7 +12,9 @@ trading code in this phase.
 Phase 5 adds a deterministic research backtest. It is a fixed baseline for
 falsification, not a recommendation engine. Phase 5.2 adds idempotent
 historical XM tick-spread backfill so execution-cost research does not depend
-on waiting weeks for live samples.
+on waiting weeks for live samples. Phase 5.3 applies the exact spread from each
+trade's M15 entry bucket, exposes fallback usage, and refuses to accept a
+strategy conclusion when exact spread coverage is below the configured gate.
 
 ## Architecture
 
@@ -311,6 +313,64 @@ Run all deterministic tests with:
 pnpm test
 ```
 
+## 10. Run the Phase 5.3 dynamic-cost diagnostic
+
+This run keeps every Strategy V1 entry and exit rule frozen. Only the execution
+cost model changes from one constant to the observed XM spread in the exact M15
+entry bucket:
+
+```bash
+curl -sS -X POST http://127.0.0.1:3001/backtests/trend-pullback \
+  -H 'Content-Type: application/json' \
+  -d '{"costModel":"historical-spread","minimumSpreadMatchPercent":95}' \
+  > /tmp/trend-pullback-dynamic-cost.json
+```
+
+Print the coverage gate and gross-versus-net diagnostics:
+
+```bash
+python3 - <<'PY'
+import json
+
+with open('/tmp/trend-pullback-dynamic-cost.json') as file:
+    report = json.load(file)
+
+print('strategy:', report['strategy'])
+print('pooled coverage:', report['pooledCostCoverage'])
+for item in report['symbols']:
+    all_trades = item['all']
+    print(
+        item['symbol'],
+        'conclusion=', item['conclusion'],
+        'match=', item['costCoverage']['matchPercent'],
+        'fallback=', item['costCoverage']['fallback'],
+        'grossR=', all_trades['averageGrossR'],
+        'costR=', all_trades['averageCostR'],
+        'netR=', all_trades['averageNetR'],
+    )
+PY
+```
+
+For each trade, Phase 5.3 records:
+
+- the exact spread basis points and whether it came from historical ticks,
+  live collection, or fallback;
+- spread cost converted into the trade's stop-risk unit (`costR`);
+- gross R before costs and net R after costs;
+- long/short direction, raw broker-timestamp hour, ATR percentage, RSI, and H1
+  and H4 EMA separation.
+
+The response aggregates those fields by direction, hour, winners versus
+losers, and market context. If an exact entry bucket is absent, the resolver
+uses the 75th-percentile spread from that symbol's selected backtest window and
+counts it as `fallback-p75`. When fewer than 95% of trades have exact matches,
+the public conclusion becomes `insufficient-spread-coverage`; the statistical
+result remains visible separately as `statisticalConclusion` for diagnosis.
+
+Do not tune Strategy V1 from these slices. Their purpose is to explain where
+the rejected baseline loses money and to define a distinct Strategy V2
+hypothesis before any new backtest is run.
+
 ## Database lifecycle
 
 Stop the database without deleting its data:
@@ -341,8 +401,8 @@ deliberately intend to delete all stored candles.
   deliberately resolved against the strategy.
 - Pooled trade statistics are not a portfolio simulation and do not model
   simultaneous exposure or cross-pair correlation.
-- Historical execution costs are assumed rather than reconstructed from tick
-  spreads until the Phase 5.2 tick importer has completed successfully.
+- Dynamic execution costs are reconstructed from the first valid bid/ask tick
+  in each M15 bucket, not from every possible fill inside that bucket.
 - Broker tick-history depth is not guaranteed. A successful API response does
   not prove that every requested historical interval was available.
 - No approved live signals, notifications, position sizing, or orders exist.

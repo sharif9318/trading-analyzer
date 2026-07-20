@@ -1,10 +1,15 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { Between, In, Repository } from 'typeorm';
 import { MarketCandleEntity } from '../market-data/entities/market-candle.entity';
-import { runTrendPullbackBacktest, summarizeTrades } from './backtest';
+import { SpreadObservationEntity } from '../market-data/entities/spread-observation.entity';
+import {
+  runTrendPullbackBacktest,
+  summarizeCostCoverage,
+  summarizeTrades,
+} from './backtest';
 import { BacktestRequestDto } from './dto/backtest-request.dto';
-import { Candle, Trade } from './types';
+import { Candle, CostResolution, Trade } from './types';
 
 const REQUIRED_TIMEFRAMES = ['PERIOD_M15', 'PERIOD_H1', 'PERIOD_H4'];
 
@@ -13,11 +18,15 @@ export class BacktestService {
   constructor(
     @InjectRepository(MarketCandleEntity)
     private readonly candles: Repository<MarketCandleEntity>,
+    @InjectRepository(SpreadObservationEntity)
+    private readonly spreads: Repository<SpreadObservationEntity>,
   ) {}
 
   async run(request: BacktestRequestDto) {
     const config = {
+      costModel: request.costModel,
       costBps: request.costBps,
+      minimumSpreadMatchPercent: request.minimumSpreadMatchPercent,
       stopAtr: request.stopAtr,
       rewardRisk: request.rewardRisk,
       maxHoldingBars: request.maxHoldingBars,
@@ -34,8 +43,18 @@ export class BacktestService {
           },
           order: { openTime: 'ASC' },
         });
+        const newestM15 = rows
+          .filter((row) => row.timeframe === 'PERIOD_M15')
+          .at(-1);
+        if (!newestM15) {
+          throw new BadRequestException(`${symbol} is missing PERIOD_M15 history`);
+        }
+        const brokerRows = rows.filter(
+          (row) =>
+            row.source === newestM15.source && row.server === newestM15.server,
+        );
         const grouped = new Map<string, Candle[]>();
-        for (const row of rows) {
+        for (const row of brokerRows) {
           const candles = grouped.get(row.timeframe) ?? [];
           candles.push({
             openTime: Number(row.openTime),
@@ -54,13 +73,39 @@ export class BacktestService {
           }
         }
 
-        return runTrendPullbackBacktest({
+        const selectedM15 = grouped
+          .get('PERIOD_M15')!
+          .slice(-request.maxM15Bars);
+        const dynamicCost =
+          request.costModel === 'historical-spread'
+            ? await this.buildHistoricalCostResolver(
+                symbol,
+                newestM15.source,
+                newestM15.server,
+                selectedM15,
+              )
+            : null;
+
+        const result = runTrendPullbackBacktest({
           symbol,
-          m15: grouped.get('PERIOD_M15')!.slice(-request.maxM15Bars),
+          m15: selectedM15,
           h1: grouped.get('PERIOD_H1')!,
           h4: grouped.get('PERIOD_H4')!,
           config,
+          costResolver: dynamicCost?.resolver,
         });
+
+        return {
+          ...result,
+          marketDataIdentity: {
+            source: newestM15.source,
+            server: newestM15.server,
+          },
+          executionCostData: dynamicCost?.metadata ?? {
+            model: 'fixed',
+            fixedCostBps: request.costBps,
+          },
+        };
       }),
     );
 
@@ -70,7 +115,7 @@ export class BacktestService {
 
     return {
       generatedAt: new Date().toISOString(),
-      strategy: 'multi-timeframe-trend-pullback-v1.1',
+      strategy: 'multi-timeframe-trend-pullback-v1.2-cost-diagnostics',
       purpose: 'baseline-falsification-not-trading-advice',
       config: {
         ...config,
@@ -82,8 +127,16 @@ export class BacktestService {
         entry: 'next-M15-bar-open',
         sameBarStopAndTarget: 'stop-first-conservative',
         positionPolicy: 'one-position-per-symbol',
-        transactionCost: 'round-trip-basis-points',
+        transactionCost:
+          request.costModel === 'historical-spread'
+            ? 'exact-entry-M15-spread-with-window-p75-fallback'
+            : 'fixed-round-trip-basis-points',
       },
+      pooledCostCoverage: summarizeCostCoverage(
+        pooledTrades,
+        request.costModel,
+        request.minimumSpreadMatchPercent,
+      ),
       pooledTradeStatistics: summarizeTrades(
         pooledTrades,
         request.riskPerTradePercent,
@@ -94,4 +147,82 @@ export class BacktestService {
       })),
     };
   }
+
+  private async buildHistoricalCostResolver(
+    symbol: string,
+    source: string,
+    server: string,
+    selectedM15: Candle[],
+  ) {
+    const firstOpenTime = selectedM15[0]?.openTime;
+    const lastOpenTime = selectedM15.at(-1)?.openTime;
+    if (firstOpenTime === undefined || lastOpenTime === undefined) {
+      throw new BadRequestException(`${symbol} has no selected M15 history`);
+    }
+
+    const rows = await this.spreads.find({
+      where: {
+        source,
+        server,
+        symbol,
+        timeframe: 'PERIOD_M15',
+        bucketOpenTime: Between(String(firstOpenTime), String(lastOpenTime)),
+      },
+      order: { bucketOpenTime: 'ASC' },
+    });
+    const validRows = rows.filter(
+      (row) => Number.isFinite(row.spreadBps) && row.spreadBps > 0,
+    );
+    if (!validRows.length) {
+      throw new BadRequestException(
+        `${symbol} has no valid PERIOD_M15 spread observations in the backtest window`,
+      );
+    }
+
+    const spreadByOpenTime = new Map<number, CostResolution>();
+    for (const row of validRows) {
+      spreadByOpenTime.set(Number(row.bucketOpenTime), {
+        costBps: row.spreadBps,
+        source:
+          row.ingestionKind === 'live'
+            ? 'live-spread'
+            : 'historical-spread',
+      });
+    }
+    const fallbackP75Bps = percentile(
+      validRows.map((row) => row.spreadBps),
+      0.75,
+    );
+
+    return {
+      resolver: (entryTime: number): CostResolution =>
+        spreadByOpenTime.get(entryTime) ?? {
+          costBps: fallbackP75Bps,
+          source: 'fallback-p75',
+        },
+      metadata: {
+        model: 'historical-spread',
+        timeframe: 'PERIOD_M15',
+        matching: 'exact-entry-bucket',
+        observationsInWindow: validRows.length,
+        oldestObservationTime: Number(validRows[0].bucketOpenTime),
+        newestObservationTime: Number(validRows.at(-1)!.bucketOpenTime),
+        fallback: 'window-p75',
+        fallbackP75Bps: round(fallbackP75Bps),
+      },
+    };
+  }
+}
+
+function percentile(values: number[], rank: number): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.max(
+    0,
+    Math.min(sorted.length - 1, Math.ceil(rank * sorted.length) - 1),
+  );
+  return sorted[index];
+}
+
+function round(value: number): number {
+  return Math.round(value * 10000) / 10000;
 }
