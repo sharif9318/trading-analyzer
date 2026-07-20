@@ -4,6 +4,8 @@ const { latestClosedFeature } = require('../dist/analysis/alignment');
 const {
   brokerHour,
   classifyConclusion,
+  findConfirmationIndex,
+  passesEntryCostGate,
   resolveBarExit,
   summarizeCostCoverage,
   transactionCostR,
@@ -127,6 +129,31 @@ test('historical spread coverage rejects a backtest below the configured gate', 
 test('broker-hour diagnostic uses the timestamp hour consistently', () => {
   const timestamp = Date.UTC(2026, 0, 1, 13, 30, 0) / 1000;
   assert.equal(brokerHour(timestamp), 13);
+});
+
+test('confirmation waits for a strict breakout and returns its candle index', () => {
+  const candles = [
+    candle(0, { high: 102, low: 98 }),
+    candle(900, { high: 102, low: 98 }),
+    candle(1800, { high: 103, low: 99 }),
+    candle(2700),
+  ];
+
+  assert.equal(findConfirmationIndex('long', candles, 0, 4), 2);
+  assert.equal(findConfirmationIndex('short', candles, 0, 4), null);
+});
+
+test('confirmation expires after four bars and preserves a following entry bar', () => {
+  const candles = Array.from({ length: 7 }, (_, index) =>
+    candle(index * 900, { high: index === 5 ? 103 : 102, low: 98 }),
+  );
+
+  assert.equal(findConfirmationIndex('long', candles, 0, 4), null);
+});
+
+test('entry cost gate includes the boundary and rejects higher costs', () => {
+  assert.equal(passesEntryCostGate(0.25, 0.25), true);
+  assert.equal(passesEntryCostGate(0.25001, 0.25), false);
 });
 
 test('historical cost resolver matches exact buckets and labels P75 fallback', async () => {

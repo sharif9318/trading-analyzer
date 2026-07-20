@@ -3,6 +3,7 @@ import { buildFeatures } from './indicators';
 import {
   BacktestConfig,
   Candle,
+  ConfirmationBacktestConfig,
   CostResolution,
   Direction,
   FeatureRow,
@@ -20,6 +21,11 @@ export interface BacktestInput {
   h4: Candle[];
   config: BacktestConfig;
   costResolver?: (entryTime: number) => CostResolution;
+}
+
+export interface ConfirmationBacktestInput
+  extends Omit<BacktestInput, 'config'> {
+  config: ConfirmationBacktestConfig;
 }
 
 interface SignalDecision {
@@ -51,6 +57,7 @@ export function runTrendPullbackBacktest(input: BacktestInput) {
       signal,
       m15,
       index,
+      index + 1,
       input.config,
       input.costResolver,
     );
@@ -102,6 +109,163 @@ export function runTrendPullbackBacktest(input: BacktestInput) {
     diagnostics: buildDiagnostics(trades, input.config.riskPerTradePercent),
     trades,
   };
+}
+
+export function runTrendPullbackConfirmationBacktest(
+  input: ConfirmationBacktestInput,
+) {
+  const m15 = buildFeatures(input.m15);
+  const h1 = buildFeatures(input.h1);
+  const h4 = buildFeatures(input.h4);
+  const trades: Trade[] = [];
+  const confirmationDelays: number[] = [];
+  const splitIndex = Math.floor(m15.length * input.config.trainFraction);
+  const splitTime = m15[splitIndex]?.openTime ?? 0;
+  let setups = 0;
+  let confirmedSetups = 0;
+  let expiredSetups = 0;
+  let costRejectedSetups = 0;
+
+  let index = 200;
+  while (index < m15.length - 1) {
+    const signal = detectSignal(m15, h1, h4, index);
+    if (!signal) {
+      index++;
+      continue;
+    }
+
+    setups++;
+    const confirmationIndex = findConfirmationIndex(
+      signal.direction,
+      m15,
+      index,
+      input.config.confirmationBars,
+    );
+    if (confirmationIndex === null) {
+      expiredSetups++;
+      index += input.config.confirmationBars + 1;
+      continue;
+    }
+
+    confirmedSetups++;
+    const confirmationBars = confirmationIndex - index;
+    confirmationDelays.push(confirmationBars);
+    const entryIndex = confirmationIndex + 1;
+    const simulated = simulateTrade(
+      input.symbol,
+      signal,
+      m15,
+      index,
+      entryIndex,
+      input.config,
+      input.costResolver,
+    );
+    if (!simulated) {
+      index = entryIndex;
+      continue;
+    }
+    if (!passesEntryCostGate(simulated.rawCostR, input.config.maximumEntryCostR)) {
+      costRejectedSetups++;
+      index = entryIndex;
+      continue;
+    }
+
+    trades.push({
+      ...simulated.trade,
+      confirmationBars,
+      confirmationTime: m15[confirmationIndex].openTime,
+    });
+    index = Math.max(entryIndex, simulated.exitIndex);
+  }
+
+  const inSampleTrades = trades.filter((trade) => trade.entryTime < splitTime);
+  const outOfSampleTrades = trades.filter((trade) => trade.entryTime >= splitTime);
+  const chronologicalFolds = buildChronologicalFolds(
+    trades,
+    m15,
+    input.config.riskPerTradePercent,
+  );
+  const profitableFolds = chronologicalFolds.filter(
+    (fold) => fold.metrics.averageNetR > 0 && (fold.metrics.profitFactor ?? 0) > 1,
+  ).length;
+  const costCoverage = summarizeCostCoverage(
+    trades,
+    input.config.costModel,
+    input.config.minimumSpreadMatchPercent,
+  );
+  const statisticalConclusion = classifyConclusion(
+    inSampleTrades,
+    outOfSampleTrades,
+    profitableFolds,
+    chronologicalFolds.length,
+  );
+
+  return {
+    symbol: input.symbol,
+    splitTime,
+    conclusion:
+      costCoverage.status === 'insufficient'
+        ? 'insufficient-spread-coverage'
+        : statisticalConclusion,
+    statisticalConclusion,
+    costCoverage,
+    setupDiagnostics: {
+      setups,
+      confirmedSetups,
+      expiredSetups,
+      costRejectedSetups,
+      enteredTrades: trades.length,
+      confirmationRatePercent: round(
+        setups ? (confirmedSetups / setups) * 100 : 0,
+      ),
+      averageConfirmationBars: round(
+        confirmationDelays.length
+          ? confirmationDelays.reduce((sum, delay) => sum + delay, 0) /
+              confirmationDelays.length
+          : 0,
+      ),
+    },
+    profitableFolds,
+    chronologicalFolds,
+    all: summarizeTrades(trades, input.config.riskPerTradePercent),
+    inSample: summarizeTrades(inSampleTrades, input.config.riskPerTradePercent),
+    outOfSample: summarizeTrades(outOfSampleTrades, input.config.riskPerTradePercent),
+    diagnostics: buildDiagnostics(trades, input.config.riskPerTradePercent),
+    trades,
+  };
+}
+
+export function findConfirmationIndex(
+  direction: Direction,
+  candles: Candle[],
+  setupIndex: number,
+  maximumBars: number,
+): number | null {
+  const setup = candles[setupIndex];
+  if (!setup || maximumBars < 1) return null;
+  const finalIndex = Math.min(
+    candles.length - 2,
+    setupIndex + maximumBars,
+  );
+
+  for (let index = setupIndex + 1; index <= finalIndex; index++) {
+    if (direction === 'long' && candles[index].high > setup.high) return index;
+    if (direction === 'short' && candles[index].low < setup.low) return index;
+  }
+
+  return null;
+}
+
+export function passesEntryCostGate(
+  costR: number,
+  maximumEntryCostR: number,
+): boolean {
+  return (
+    Number.isFinite(costR) &&
+    costR >= 0 &&
+    maximumEntryCostR >= 0 &&
+    costR <= maximumEntryCostR
+  );
 }
 
 export function summarizeTrades(trades: Trade[], riskPerTradePercent: number) {
@@ -232,11 +396,11 @@ function simulateTrade(
   decision: SignalDecision,
   m15: FeatureRow[],
   signalIndex: number,
+  entryIndex: number,
   config: BacktestConfig,
   costResolver?: (entryTime: number) => CostResolution,
-): { trade: Trade; exitIndex: number } | null {
+): { trade: Trade; exitIndex: number; rawCostR: number } | null {
   const signal = m15[signalIndex];
-  const entryIndex = signalIndex + 1;
   const entryBar = m15[entryIndex];
   if (!entryBar || signal.atr14 === null || signal.atr14 <= 0) return null;
 
@@ -280,6 +444,7 @@ function simulateTrade(
 
   return {
     exitIndex,
+    rawCostR: costR,
     trade: {
       symbol,
       direction,
@@ -348,6 +513,8 @@ export function summarizeCostCoverage(
     status:
       costModel === 'fixed'
         ? 'not-applicable'
+        : trades.length === 0
+          ? 'no-trades'
         : matchPercent >= minimumMatchPercent
           ? 'sufficient'
           : 'insufficient',

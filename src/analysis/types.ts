@@ -39,6 +39,11 @@ export interface BacktestConfig {
   riskPerTradePercent: number;
 }
 
+export interface ConfirmationBacktestConfig extends BacktestConfig {
+  confirmationBars: number;
+  maximumEntryCostR: number;
+}
+
 export interface Trade {
   symbol: string;
   direction: Direction;
@@ -63,4 +68,6 @@ export interface Trade {
   };
   grossR: number;
   netR: number;
+  confirmationBars?: number;
+  confirmationTime?: number;
 }

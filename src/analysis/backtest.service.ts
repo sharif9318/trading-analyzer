@@ -4,11 +4,13 @@ import { Between, In, Repository } from 'typeorm';
 import { MarketCandleEntity } from '../market-data/entities/market-candle.entity';
 import { SpreadObservationEntity } from '../market-data/entities/spread-observation.entity';
 import {
+  runTrendPullbackConfirmationBacktest,
   runTrendPullbackBacktest,
   summarizeCostCoverage,
   summarizeTrades,
 } from './backtest';
 import { BacktestRequestDto } from './dto/backtest-request.dto';
+import { ConfirmationBacktestRequestDto } from './dto/confirmation-backtest-request.dto';
 import { Candle, CostResolution, Trade } from './types';
 
 const REQUIRED_TIMEFRAMES = ['PERIOD_M15', 'PERIOD_H1', 'PERIOD_H4'];
@@ -23,7 +25,23 @@ export class BacktestService {
   ) {}
 
   async run(request: BacktestRequestDto) {
-    const config = {
+    return this.runStrategy(request, 'immediate-entry');
+  }
+
+  async runConfirmation(request: ConfirmationBacktestRequestDto) {
+    if (request.costModel !== 'historical-spread') {
+      throw new BadRequestException(
+        'Strategy V2A requires costModel=historical-spread',
+      );
+    }
+    return this.runStrategy(request, 'confirmation-entry');
+  }
+
+  private async runStrategy(
+    request: BacktestRequestDto,
+    variant: 'immediate-entry' | 'confirmation-entry',
+  ) {
+    const baseConfig = {
       costModel: request.costModel,
       costBps: request.costBps,
       minimumSpreadMatchPercent: request.minimumSpreadMatchPercent,
@@ -33,6 +51,14 @@ export class BacktestService {
       trainFraction: request.trainFraction,
       riskPerTradePercent: request.riskPerTradePercent,
     };
+    const config =
+      variant === 'confirmation-entry'
+        ? {
+            ...baseConfig,
+            confirmationBars: 4,
+            maximumEntryCostR: 0.25,
+          }
+        : baseConfig;
 
     const internalResults = await Promise.all(
       request.symbols.map(async (symbol) => {
@@ -86,14 +112,27 @@ export class BacktestService {
               )
             : null;
 
-        const result = runTrendPullbackBacktest({
+        const commonInput = {
           symbol,
           m15: selectedM15,
           h1: grouped.get('PERIOD_H1')!,
           h4: grouped.get('PERIOD_H4')!,
-          config,
           costResolver: dynamicCost?.resolver,
-        });
+        };
+        const result =
+          variant === 'confirmation-entry'
+            ? runTrendPullbackConfirmationBacktest({
+                ...commonInput,
+                config: {
+                  ...baseConfig,
+                  confirmationBars: 4,
+                  maximumEntryCostR: 0.25,
+                },
+              })
+            : runTrendPullbackBacktest({
+                ...commonInput,
+                config: baseConfig,
+              });
 
         return {
           ...result,
@@ -115,8 +154,14 @@ export class BacktestService {
 
     return {
       generatedAt: new Date().toISOString(),
-      strategy: 'multi-timeframe-trend-pullback-v1.2-cost-diagnostics',
-      purpose: 'baseline-falsification-not-trading-advice',
+      strategy:
+        variant === 'confirmation-entry'
+          ? 'multi-timeframe-trend-pullback-v2a-confirmation'
+          : 'multi-timeframe-trend-pullback-v1.2-cost-diagnostics',
+      purpose:
+        variant === 'confirmation-entry'
+          ? 'confirmation-hypothesis-falsification-not-trading-advice'
+          : 'baseline-falsification-not-trading-advice',
       config: {
         ...config,
         maxM15Bars: request.maxM15Bars,
@@ -124,7 +169,18 @@ export class BacktestService {
       },
       executionModel: {
         signalData: 'closed-candles-only',
-        entry: 'next-M15-bar-open',
+        entry:
+          variant === 'confirmation-entry'
+            ? 'open-after-breakout-confirmation-within-four-M15-bars'
+            : 'next-M15-bar-open',
+        setupCancellation:
+          variant === 'confirmation-entry'
+            ? 'cancel-after-four-M15-bars-without-confirmation'
+            : 'not-applicable',
+        entryCostGate:
+          variant === 'confirmation-entry'
+            ? 'reject-when-costR-exceeds-0.25'
+            : 'none',
         sameBarStopAndTarget: 'stop-first-conservative',
         positionPolicy: 'one-position-per-symbol',
         transactionCost:

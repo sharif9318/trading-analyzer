@@ -1,4 +1,4 @@
-# Trading Analyzer — Phase 5.3
+# Trading Analyzer — Phase 5.4
 
 This is a read-only XM MetaTrader 5 to NestJS market-data pipeline. The live EA
 publishes newly closed candles, a separate MT5 script imports history, and
@@ -15,6 +15,8 @@ historical XM tick-spread backfill so execution-cost research does not depend
 on waiting weeks for live samples. Phase 5.3 applies the exact spread from each
 trade's M15 entry bucket, exposes fallback usage, and refuses to accept a
 strategy conclusion when exact spread coverage is below the configured gate.
+Phase 5.4 adds Strategy V2A as a separate confirmation hypothesis while
+preserving V1 unchanged as the rejected baseline.
 
 ## Architecture
 
@@ -370,6 +372,61 @@ result remains visible separately as `statisticalConclusion` for diagnosis.
 Do not tune Strategy V1 from these slices. Their purpose is to explain where
 the rejected baseline loses money and to define a distinct Strategy V2
 hypothesis before any new backtest is run.
+
+## 11. Falsify Strategy V2A confirmation
+
+V2A keeps the V1 trend, pullback, stop, target, and maximum holding rules. Its
+single market hypothesis is that a pullback needs renewed continuation before
+entry. A long setup must break the pullback candle's high, and a short setup
+must break its low, within the next four closed M15 candles. Entry occurs at
+the following M15 open. An unconfirmed setup expires.
+
+The endpoint requires historical spread costs and rejects an otherwise valid
+entry when its exact spread exceeds `0.25R` of the planned stop distance. The
+four-bar window and `0.25R` gate are frozen constants, not request parameters.
+
+```bash
+curl -sS -X POST \
+  http://127.0.0.1:3001/backtests/trend-pullback-confirmation \
+  -H 'Content-Type: application/json' \
+  -d '{"minimumSpreadMatchPercent":95}' \
+  > /tmp/backtest-v2a.json
+```
+
+Print the decision summary:
+
+```bash
+python3 - <<'PY'
+import json
+
+with open('/tmp/backtest-v2a.json') as file:
+    report = json.load(file)
+
+print('strategy:', report['strategy'])
+print('pooled coverage:', report['pooledCostCoverage'])
+print('pooled trades:', report['pooledTradeStatistics'])
+
+for item in report['symbols']:
+    print(
+        item['symbol'],
+        'conclusion=', item['conclusion'],
+        'setups=', item['setupDiagnostics'],
+        'folds=', f"{item['profitableFolds']}/5",
+        'all=', item['all'],
+        'OOS=', item['outOfSample'],
+    )
+PY
+```
+
+`setupDiagnostics` separates all detected pullbacks into confirmed, expired,
+cost-rejected, and entered groups. This prevents a strategy with only a few
+surviving trades from looking convincing. V2A is rejected when its OOS sample
+is insufficient, OOS expectancy is non-positive, or fewer than three of five
+chronological folds are profitable after exact costs.
+
+Economic events are intentionally not included in V2A. They will be tested as
+a separately attributable risk filter only after the confirmation hypothesis
+has been measured.
 
 ## Database lifecycle
 
