@@ -1,4 +1,4 @@
-# Trading Analyzer — Phase 5.4
+# Trading Analyzer — Phase 5.5.2
 
 This is a read-only XM MetaTrader 5 to NestJS market-data pipeline. The live EA
 publishes newly closed candles, a separate MT5 script imports history, and
@@ -17,6 +17,11 @@ trade's M15 entry bucket, exposes fallback usage, and refuses to accept a
 strategy conclusion when exact spread coverage is below the configured gate.
 Phase 5.4 adds Strategy V2A as a separate confirmation hypothesis while
 preserving V1 unchanged as the rejected baseline.
+Phase 5.5 adds an independent MetaTrader economic-calendar dataset, integrity
+gate, and audit API. Events are not yet allowed to filter trades or generate
+signals. Phase 5.5.2 records irrecoverable MT5 calendar timeouts as explicit
+coverage gaps and continues importing later dates without presenting the
+dataset as complete.
 
 ## Architecture
 
@@ -428,6 +433,102 @@ Economic events are intentionally not included in V2A. They will be tested as
 a separately attributable risk filter only after the confirmation hypothesis
 has been measured.
 
+## 12. Backfill the MT5 economic calendar
+
+Phase 5.5 stores event definitions separately from timestamped releases. This
+preserves MetaQuotes event/value IDs, currencies, importance, release values,
+revisions, and raw XM trade-server timestamps. Re-running the import updates
+the same identities instead of creating duplicate rows.
+
+After installing this project version, restart NestJS once. The new database
+migration runs automatically and creates:
+
+- `economic_event_definitions`;
+- `economic_event_releases`;
+- `economic_event_coverage_gaps`.
+
+Install the importer:
+
+1. In MT5 choose **File -> Open Data Folder**.
+2. Open `MQL5/Scripts`.
+3. Copy `mt5/HistoricalEconomicCalendarBackfill.mq5` into that folder.
+4. Open the copied file in MetaEditor and press **Compile**.
+5. Return to MT5 and refresh **Navigator -> Scripts**.
+6. Drag `HistoricalEconomicCalendarBackfill` onto any chart.
+
+Recommended first run:
+
+- `BackendUrl`: `http://127.0.0.1:3001/market-data/economic-events/backfill`
+- `CoverageUrl`: `http://127.0.0.1:3001/market-data/economic-events/coverage`
+- `BridgeApiKey`: the exact value in `.env`
+- `CurrenciesCsv`: `USD,EUR,GBP,JPY,AUD,CHF,CAD`
+- `DaysBack`: `180`
+- `ChunkDays`: `7`
+- `BatchSize`: `50`
+- `RequestDelayMs`: `100`
+
+The API URL uses the same already-approved `http://127.0.0.1:3001` WebRequest
+base. This is a one-time script, not another continuously attached EA. It
+queries calendar history in small ranges, resolves event and country metadata,
+uploads batches, reports unresolved definitions, and exits. If MetaTrader
+returns calendar timeout `5401`, version `1.003` automatically shrinks that
+request window down to one day. If the aggregate one-day query still times
+out, it uses MetaQuotes' per-event history API. If both paths time out, it
+posts the exact one-day interval as an open coverage gap and continues with
+later dates. A later successful rerun resolves any fully covered gap.
+
+If an earlier run stopped partway through, rerun only its failed currencies.
+For example, use `USD,EUR,GBP,JPY,AUD` in `CurrenciesCsv`. The database upserts
+MetaQuotes identities, so repeating already accepted releases is safe.
+
+Check database coverage and integrity:
+
+```bash
+curl -s \
+  'http://127.0.0.1:3001/market-data/economic-events/quality?minimumReleases=100&maximumStalenessDays=14' \
+  | python3 -m json.tool
+```
+
+`ready` requires at least the requested number of releases for all seven
+currencies, a newest release no more than the configured number of days old,
+and zero orphan releases, incomplete definitions, unsupported currency
+records, or open coverage gaps. `collecting` means coverage is incomplete. A
+currency becomes `stale` when an import stopped too far in the past and `gap`
+when at least one recorded interval could not be retrieved. Both conditions
+make the overall status `investigate`; integrity failures do the same.
+
+Inspect recent high-importance USD releases:
+
+```bash
+curl -s \
+  'http://127.0.0.1:3001/market-data/economic-events?currency=USD&importance=3&limit=20' \
+  | python3 -m json.tool
+```
+
+Direct database counts:
+
+```bash
+docker compose exec postgres psql \
+  -U trading_analyzer \
+  -d trading_analyzer \
+  -c "SELECT currency, count(*) FROM economic_event_releases GROUP BY currency ORDER BY currency;"
+```
+
+Inspect open intervals that future event backtests must exclude:
+
+```bash
+docker compose exec postgres psql \
+  -U trading_analyzer \
+  -d trading_analyzer \
+  -c "SELECT currency, range_from, range_to, error_code FROM economic_event_coverage_gaps WHERE status = 'open' ORDER BY currency, range_from;"
+```
+
+Phase 5.5 does not use actual, forecast, or surprise values in a backtest.
+Historical backfill gives the current calendar history snapshot, not proof of
+what a trader knew at every original publication instant. The first permitted
+event experiment will therefore use only currency, scheduled time, event
+identity, and importance.
+
 ## Database lifecycle
 
 Stop the database without deleting its data:
@@ -462,4 +563,8 @@ deliberately intend to delete all stored candles.
   in each M15 bucket, not from every possible fill inside that bucket.
 - Broker tick-history depth is not guaranteed. A successful API response does
   not prove that every requested historical interval was available.
+- Historical calendar actual/forecast fields are not yet point-in-time
+  snapshots. They must not be used as pre-release model features.
+- Economic events are stored and auditable but are not connected to either
+  rejected strategy.
 - No approved live signals, notifications, position sizing, or orders exist.

@@ -11,18 +11,24 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'node:crypto';
 import { CandleQueryDto } from './dto/candle-query.dto';
+import { EconomicEventBackfillDto } from './dto/economic-event-backfill.dto';
+import { EconomicEventCoverageDto } from './dto/economic-event-coverage.dto';
+import { EconomicEventQualityQueryDto } from './dto/economic-event-quality-query.dto';
+import { EconomicEventQueryDto } from './dto/economic-event-query.dto';
 import { HistoricalBackfillDto } from './dto/historical-backfill.dto';
 import { MarketSnapshotBatchDto } from './dto/market-snapshot.dto';
 import { QualityQueryDto } from './dto/quality-query.dto';
 import { SpreadBackfillDto } from './dto/spread-backfill.dto';
 import { MarketDataService } from './market-data.service';
 import { DataQualityService } from './quality/data-quality.service';
+import { EconomicEventQualityService } from './quality/economic-event-quality.service';
 
 @Controller('market-data')
 export class MarketDataController {
   constructor(
     private readonly marketDataService: MarketDataService,
     private readonly dataQualityService: DataQualityService,
+    private readonly economicEventQualityService: EconomicEventQualityService,
     private readonly config: ConfigService,
   ) {}
 
@@ -78,6 +84,41 @@ export class MarketDataController {
   ) {
     this.assertBridgeKey(bridgeKey);
     return this.marketDataService.backfillSpreads(batch);
+  }
+
+  @Post('economic-events/backfill')
+  @HttpCode(202)
+  async economicEventBackfill(
+    @Headers('x-bridge-key') bridgeKey: string | undefined,
+    @Body() batch: EconomicEventBackfillDto,
+  ) {
+    this.assertBridgeKey(bridgeKey);
+    return this.marketDataService.backfillEconomicEvents(batch);
+  }
+
+  @Post('economic-events/coverage')
+  @HttpCode(202)
+  async economicEventCoverage(
+    @Headers('x-bridge-key') bridgeKey: string | undefined,
+    @Body() coverage: EconomicEventCoverageDto,
+  ) {
+    this.assertBridgeKey(bridgeKey);
+    return this.marketDataService.recordEconomicEventCoverage(coverage);
+  }
+
+  @Get('economic-events/quality')
+  async economicEventQuality(@Query() query: EconomicEventQualityQueryDto) {
+    return this.economicEventQualityService.report(
+      query.minimumReleases,
+      query.maximumStalenessDays,
+    );
+  }
+
+  @Get('economic-events')
+  async economicEvents(@Query() query: EconomicEventQueryDto) {
+    return {
+      events: await this.marketDataService.economicEvents(query),
+    };
   }
 
   @Get('coverage')
