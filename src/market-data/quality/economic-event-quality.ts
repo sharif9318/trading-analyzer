@@ -29,6 +29,7 @@ export interface EconomicEventCoverageGapRow {
   currency: string;
   rangeFrom: number;
   rangeTo: number;
+  eventId: string | null;
   errorCode: number | null;
   aggregateAttempted: boolean;
   perEventAttempted: boolean;
@@ -88,7 +89,7 @@ export function buildEconomicEventQualityReport(
   );
 
   return {
-    model: 'mt5-economic-calendar-v3-explicit-gaps',
+    model: 'economic-calendar-v5-source-aware',
     status: hasIntegrityFailure ||
       openGaps.length > 0 ||
       currencies.some((item) => item.status === 'stale')
@@ -105,6 +106,8 @@ export function buildEconomicEventQualityReport(
     },
     coverageGaps: {
       openCount: openGaps.length,
+      fullIntervalCount: openGaps.filter((gap) => gap.eventId === null).length,
+      eventSpecificCount: openGaps.filter((gap) => gap.eventId !== null).length,
       gappedCurrencies: [...gappedCurrencySet].sort(),
       intervals: openGaps,
     },

@@ -104,6 +104,7 @@ test('economic calendar gaps remain explicit and block ready status', () => {
         currency: 'USD',
         rangeFrom: 1_500_000,
         rangeTo: 1_586_399,
+        eventId: null,
         errorCode: 5401,
         aggregateAttempted: true,
         perEventAttempted: true,
@@ -112,7 +113,7 @@ test('economic calendar gaps remain explicit and block ready status', () => {
   );
 
   assert.equal(report.status, 'investigate');
-  assert.equal(report.model, 'mt5-economic-calendar-v3-explicit-gaps');
+  assert.equal(report.model, 'economic-calendar-v5-source-aware');
   assert.deepEqual(report.coverageGaps.gappedCurrencies, ['USD']);
   assert.equal(report.coverageGaps.openCount, 1);
   assert.equal(
@@ -133,6 +134,7 @@ test('a recorded gap is visible even before any releases are stored', () => {
         currency: 'JPY',
         rangeFrom: 1_500_000,
         rangeTo: 1_586_399,
+        eventId: null,
         errorCode: 5401,
         aggregateAttempted: true,
         perEventAttempted: true,
@@ -145,4 +147,31 @@ test('a recorded gap is visible even before any releases are stored', () => {
     report.currencies.find((item) => item.currency === 'JPY').status,
     'gap',
   );
+});
+
+test('event-specific calendar gaps preserve the failing event identity', () => {
+  const report = buildEconomicEventQualityReport(
+    SUPPORTED_EVENT_CURRENCIES.map((currency) => row(currency, 150)),
+    100,
+    14,
+    cleanIntegrity,
+    2_000_000,
+    [
+      {
+        currency: 'USD',
+        rangeFrom: 1_500_000,
+        rangeTo: 1_586_399,
+        eventId: '840010001',
+        errorCode: 5401,
+        aggregateAttempted: true,
+        perEventAttempted: true,
+      },
+    ],
+  );
+
+  assert.equal(report.status, 'investigate');
+  assert.equal(report.coverageGaps.intervals[0].eventId, '840010001');
+  assert.equal(report.coverageGaps.fullIntervalCount, 0);
+  assert.equal(report.coverageGaps.eventSpecificCount, 1);
+  assert.deepEqual(report.coverageGaps.gappedCurrencies, ['USD']);
 });

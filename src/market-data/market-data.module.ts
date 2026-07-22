@@ -9,6 +9,8 @@ import { MarketDataController } from './market-data.controller';
 import { MarketDataService } from './market-data.service';
 import { DataQualityService } from './quality/data-quality.service';
 import { EconomicEventQualityService } from './quality/economic-event-quality.service';
+import { TradingEconomicsService } from './providers/trading-economics.service';
+import { InstrumentCatalogEntity } from './entities/instrument-catalog.entity';
 
 @Module({
   imports: [
@@ -18,6 +20,7 @@ import { EconomicEventQualityService } from './quality/economic-event-quality.se
       EconomicEventDefinitionEntity,
       EconomicEventReleaseEntity,
       EconomicEventCoverageGapEntity,
+      InstrumentCatalogEntity,
     ]),
   ],
   controllers: [MarketDataController],
@@ -25,6 +28,7 @@ import { EconomicEventQualityService } from './quality/economic-event-quality.se
     MarketDataService,
     DataQualityService,
     EconomicEventQualityService,
+    TradingEconomicsService,
   ],
 })
 export class MarketDataModule {}

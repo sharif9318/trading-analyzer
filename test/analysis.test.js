@@ -13,6 +13,16 @@ const {
 const { BacktestService } = require('../dist/analysis/backtest.service');
 const { atr, ema, rsi } = require('../dist/analysis/indicators');
 const { spreadBps, summarizeSpreadObservations } = require('../dist/analysis/spreads');
+const {
+  GOLD_SESSION_BREAKOUT_RULES,
+  brokerDateKey,
+  isCompleteReferenceSession,
+  runGoldSessionBreakoutBacktest,
+} = require('../dist/analysis/session-breakout');
+const {
+  inferCandidateAssetClass,
+  midpointSpreadBps,
+} = require('../dist/market-data/instrument-catalog');
 
 function candle(openTime, overrides = {}) {
   return {
@@ -224,4 +234,162 @@ test('spread calibration excludes zero and crossed quotes', () => {
   assert.equal(report.status, 'collecting');
   assert.equal(report.oldestObservedAt, 1);
   assert.equal(report.newestObservedAt, 1);
+});
+
+test('instrument catalog assigns conservative candidate asset classes', () => {
+  assert.equal(
+    inferCandidateAssetClass('Forex\\Majors', 'Euro vs US Dollar', 'EUR', 'USD'),
+    'fx',
+  );
+  assert.equal(
+    inferCandidateAssetClass('CFD Cash\\Indices', 'US 500 Cash Index', '', 'USD'),
+    'equity-index',
+  );
+  assert.equal(
+    inferCandidateAssetClass('CFD\\Metals', 'Gold', 'GOLD', 'USD'),
+    'commodity',
+  );
+  assert.equal(
+    inferCandidateAssetClass('Shares\\US', 'Example Corp', 'EXAMPLE', 'USD'),
+    'other',
+  );
+});
+
+test('instrument catalog spread calculation rejects absent quotes', () => {
+  assert.equal(midpointSpreadBps(null, null), null);
+  assert.equal(midpointSpreadBps(0, 0), null);
+  assert.equal(midpointSpreadBps(2, 1), null);
+  assert.ok(Math.abs(midpointSpreadBps(99, 101) - 200) < 1e-12);
+});
+
+test('gold reference session requires all 28 consecutive M15 broker-time bars', () => {
+  const dayStart = Date.UTC(2026, 0, 5) / 1000;
+  const rows = Array.from({ length: 28 }, (_, index) =>
+    candle(dayStart + 3600 + index * 900),
+  );
+  const allIndices = rows.map((_, index) => index);
+
+  assert.equal(isCompleteReferenceSession(rows, allIndices), true);
+  assert.equal(
+    isCompleteReferenceSession(
+      rows,
+      allIndices.filter((index) => index !== 12),
+    ),
+    false,
+  );
+  assert.equal(brokerDateKey(dayStart), '2026-01-05');
+});
+
+test('gold session breakout enters next bar once and charges historical spread', () => {
+  const dayStart = Date.UTC(2026, 0, 5) / 1000;
+  const rows = Array.from({ length: 92 }, (_, index) => {
+    const openTime = dayStart + index * 900;
+    const hour = new Date(openTime * 1000).getUTCHours();
+    const base = {
+      open: 100,
+      high: 100.5,
+      low: 99.5,
+      close: 100,
+    };
+
+    if (hour === 8 && new Date(openTime * 1000).getUTCMinutes() === 0) {
+      return candle(openTime, {
+        open: 100,
+        high: 103,
+        low: 99.8,
+        close: 102,
+      });
+    }
+    if (hour === 8 && new Date(openTime * 1000).getUTCMinutes() === 15) {
+      return candle(openTime, {
+        open: 102,
+        high: 102.2,
+        low: 101.8,
+        close: 102,
+      });
+    }
+    if (hour === 9) {
+      return candle(openTime, {
+        open: 98,
+        high: 98.2,
+        low: 97.8,
+        close: 98,
+      });
+    }
+    return candle(openTime, base);
+  });
+
+  const report = runGoldSessionBreakoutBacktest({
+    symbol: 'GOLD#',
+    m15: rows,
+    config: {
+      costModel: 'historical-spread',
+      costBps: 0,
+      minimumSpreadMatchPercent: 95,
+      trainFraction: 0.7,
+      riskPerTradePercent: 1,
+    },
+    costResolver: () => ({
+      costBps: 0.8,
+      source: 'historical-spread',
+    }),
+  });
+
+  assert.equal(report.trades.length, 1);
+  assert.equal(report.trades[0].direction, 'long');
+  assert.equal(report.trades[0].signalTime, dayStart + 8 * 3600);
+  assert.equal(report.trades[0].entryTime, dayStart + 8 * 3600 + 900);
+  assert.equal(report.trades[0].costSource, 'historical-spread');
+  assert.equal(report.costCoverage.matchPercent, 100);
+  assert.equal(report.sessionDiagnostics.enteredTrades, 1);
+  assert.equal(GOLD_SESSION_BREAKOUT_RULES.tradesPerBrokerDay, 1);
+});
+
+test('gold session breakout requires a closing-price break, not a wick', () => {
+  const dayStart = Date.UTC(2026, 0, 5) / 1000;
+  const rows = Array.from({ length: 92 }, (_, index) => {
+    const openTime = dayStart + index * 900;
+    const date = new Date(openTime * 1000);
+    if (date.getUTCHours() === 8 && date.getUTCMinutes() === 0) {
+      return candle(openTime, {
+        open: 100,
+        high: 102,
+        low: 99.5,
+        close: 100.4,
+      });
+    }
+    if (date.getUTCHours() === 8 && date.getUTCMinutes() === 30) {
+      return candle(openTime, {
+        open: 100,
+        high: 102,
+        low: 99.5,
+        close: 101,
+      });
+    }
+    return candle(openTime, {
+      open: 100,
+      high: 100.5,
+      low: 99.5,
+      close: 100,
+    });
+  });
+
+  const report = runGoldSessionBreakoutBacktest({
+    symbol: 'GOLD#',
+    m15: rows,
+    config: {
+      costModel: 'historical-spread',
+      costBps: 0,
+      minimumSpreadMatchPercent: 95,
+      trainFraction: 0.7,
+      riskPerTradePercent: 1,
+    },
+    costResolver: () => ({
+      costBps: 0.8,
+      source: 'historical-spread',
+    }),
+  });
+
+  assert.equal(report.trades.length, 1);
+  assert.equal(report.trades[0].signalTime, dayStart + 8 * 3600 + 1800);
 });

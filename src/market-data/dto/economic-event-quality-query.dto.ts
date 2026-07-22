@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
 export class EconomicEventQualityQueryDto {
   @IsOptional()
@@ -15,4 +15,9 @@ export class EconomicEventQualityQueryDto {
   @Min(1)
   @Max(365)
   maximumStalenessDays = 14;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  source?: string;
 }

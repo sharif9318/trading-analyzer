@@ -1,5 +1,5 @@
 #property copyright "Trading Analyzer"
-#property version   "1.003"
+#property version   "1.004"
 #property strict
 #property script_show_inputs
 
@@ -116,10 +116,13 @@ bool BackfillCurrency(const string currency, int &gap_count)
          chunk_to = range_to;
 
       MqlCalendarValue values[];
+      ulong failed_event_ids[];
+      int failed_event_errors[];
       int count = -1;
       int last_error = 0;
       bool aggregate_attempted = false;
       bool per_event_attempted = false;
+      bool partial_event_coverage = false;
       while(true)
         {
          count = -1;
@@ -189,10 +192,13 @@ bool BackfillCurrency(const string currency, int &gap_count)
                chunk_from,
                chunk_to,
                values,
+               failed_event_ids,
+               failed_event_errors,
                fallback_error
             ))
               {
                count = ArraySize(values);
+               partial_event_coverage = ArraySize(failed_event_ids) > 0;
                last_error = 0;
                break;
               }
@@ -214,7 +220,9 @@ bool BackfillCurrency(const string currency, int &gap_count)
                "gap",
                last_error,
                aggregate_attempted,
-               per_event_attempted
+               per_event_attempted,
+               "",
+               failed_event_ids
             ))
                return(false);
 
@@ -285,16 +293,63 @@ bool BackfillCurrency(const string currency, int &gap_count)
             Sleep(RequestDelayMs);
         }
 
-      if(!SendCoverageStatus(
-         currency,
-         chunk_from,
-         chunk_to,
-         "complete",
-         0,
-         aggregate_attempted,
-         per_event_attempted
-      ))
-         return(false);
+      if(partial_event_coverage)
+        {
+         int failed_count = ArraySize(failed_event_ids);
+         for(int i = 0; i < failed_count; i++)
+           {
+            string failed_event_id = StringFormat("%I64u", failed_event_ids[i]);
+            if(!SendCoverageStatus(
+               currency,
+               chunk_from,
+               chunk_to,
+               "gap",
+               failed_event_errors[i],
+               aggregate_attempted,
+               per_event_attempted,
+               failed_event_id,
+               failed_event_ids
+            ))
+               return(false);
+           }
+
+         if(!SendCoverageStatus(
+            currency,
+            chunk_from,
+            chunk_to,
+            "partial",
+            0,
+            aggregate_attempted,
+            per_event_attempted,
+            "",
+            failed_event_ids
+         ))
+            return(false);
+
+         gap_count += failed_count;
+         PrintFormat(
+            "Imported retrievable %s calendar events for %s to %s and recorded %d event-specific gaps",
+            currency,
+            TimeToString(chunk_from, TIME_DATE|TIME_MINUTES),
+            TimeToString(chunk_to, TIME_DATE|TIME_MINUTES),
+            failed_count
+         );
+        }
+      else
+        {
+         if(!SendCoverageStatus(
+            currency,
+            chunk_from,
+            chunk_to,
+            "complete",
+            0,
+            aggregate_attempted,
+            per_event_attempted,
+            "",
+            failed_event_ids
+         ))
+            return(false);
+        }
 
       if(chunk_to == range_to)
          break;
@@ -319,15 +374,25 @@ bool SendCoverageStatus(
    const string status_name,
    const int error_code,
    const bool aggregate_attempted,
-   const bool per_event_attempted
+   const bool per_event_attempted,
+   const string event_id,
+   const ulong &failed_event_ids[]
 )
   {
    string error_field = "null";
    if(error_code > 0)
       error_field = IntegerToString(error_code);
 
+   string event_field = "";
+   if(StringLen(event_id) > 0)
+      event_field = ",\"eventId\":\"" + JsonEscape(event_id) + "\"";
+
+   string failed_events_field = "";
+   if(status_name == "partial")
+      failed_events_field = ",\"failedEventIds\":" + BuildEventIdArrayJson(failed_event_ids);
+
    string payload = StringFormat(
-      "{\"source\":\"MetaQuotes-Calendar\",\"server\":\"%s\",\"currency\":\"%s\",\"rangeFrom\":%I64d,\"rangeTo\":%I64d,\"status\":\"%s\",\"errorCode\":%s,\"aggregateAttempted\":%s,\"perEventAttempted\":%s}",
+      "{\"source\":\"MetaQuotes-Calendar\",\"server\":\"%s\",\"currency\":\"%s\",\"rangeFrom\":%I64d,\"rangeTo\":%I64d,\"status\":\"%s\",\"errorCode\":%s,\"aggregateAttempted\":%s,\"perEventAttempted\":%s%s%s}",
       JsonEscape(AccountInfoString(ACCOUNT_SERVER)),
       JsonEscape(currency),
       (long)range_from,
@@ -335,7 +400,9 @@ bool SendCoverageStatus(
       JsonEscape(status_name),
       error_field,
       aggregate_attempted ? "true" : "false",
-      per_event_attempted ? "true" : "false"
+      per_event_attempted ? "true" : "false",
+      event_field,
+      failed_events_field
    );
 
    uchar utf8[];
@@ -388,15 +455,33 @@ bool SendCoverageStatus(
    return(true);
   }
 
+string BuildEventIdArrayJson(const ulong &event_ids[])
+  {
+   string items = "";
+   int count = ArraySize(event_ids);
+   for(int i = 0; i < count; i++)
+     {
+      if(i > 0)
+         items += ",";
+      items += StringFormat("\"%I64u\"", event_ids[i]);
+     }
+   return("[" + items + "]");
+  }
+
 bool LoadCalendarValuesByEvent(
    const string currency,
    const datetime range_from,
    const datetime range_to,
    MqlCalendarValue &values[],
+   ulong &failed_event_ids[],
+   int &failed_event_errors[],
    int &last_error
 )
   {
+   const int CALENDAR_TIMEOUT_ERROR = 5401;
    ArrayFree(values);
+   ArrayFree(failed_event_ids);
+   ArrayFree(failed_event_errors);
    MqlCalendarEvent events[];
    int event_count = -1;
    last_error = 0;
@@ -449,7 +534,28 @@ bool LoadCalendarValuesByEvent(
         }
 
       if(value_count < 0)
-         return(false);
+        {
+         if(last_error != CALENDAR_TIMEOUT_ERROR)
+            return(false);
+
+         int failed_count = ArraySize(failed_event_ids);
+         int next_failed_count = failed_count + 1;
+         if(ArrayResize(failed_event_ids, next_failed_count) != next_failed_count ||
+            ArrayResize(failed_event_errors, next_failed_count) != next_failed_count)
+           {
+            last_error = 4004;
+            return(false);
+           }
+
+         failed_event_ids[failed_count] = events[i].id;
+         failed_event_errors[failed_count] = last_error;
+         PrintFormat(
+            "Skipping timed-out %s event %I64u for this interval; other events will continue",
+            currency,
+            events[i].id
+         );
+         continue;
+        }
       if(value_count == 0)
          continue;
 
@@ -470,11 +576,12 @@ bool LoadCalendarValuesByEvent(
      }
 
    PrintFormat(
-      "Per-event fallback recovered %d calendar values for %s from %s to %s",
+      "Per-event fallback recovered %d calendar values for %s from %s to %s; failed event IDs: %d",
       total,
       currency,
       TimeToString(range_from, TIME_DATE|TIME_MINUTES),
-      TimeToString(range_to, TIME_DATE|TIME_MINUTES)
+      TimeToString(range_to, TIME_DATE|TIME_MINUTES),
+      ArraySize(failed_event_ids)
    );
    return(true);
   }

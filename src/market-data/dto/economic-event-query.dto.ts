@@ -2,12 +2,19 @@ import { Type } from 'class-transformer';
 import {
   IsInt,
   IsOptional,
+  IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 
 export class EconomicEventQueryDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  source?: string;
+
   @IsOptional()
   @Matches(/^[A-Z]{3}$/)
   currency?: string;

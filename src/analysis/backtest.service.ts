@@ -11,7 +11,13 @@ import {
 } from './backtest';
 import { BacktestRequestDto } from './dto/backtest-request.dto';
 import { ConfirmationBacktestRequestDto } from './dto/confirmation-backtest-request.dto';
+import { GoldSessionBreakoutRequestDto } from './dto/gold-session-breakout-request.dto';
 import { Candle, CostResolution, Trade } from './types';
+import {
+  GOLD_SESSION_BREAKOUT_ACCEPTANCE,
+  GOLD_SESSION_BREAKOUT_RULES,
+  runGoldSessionBreakoutBacktest,
+} from './session-breakout';
 
 const REQUIRED_TIMEFRAMES = ['PERIOD_M15', 'PERIOD_H1', 'PERIOD_H4'];
 
@@ -35,6 +41,94 @@ export class BacktestService {
       );
     }
     return this.runStrategy(request, 'confirmation-entry');
+  }
+
+  async runGoldSessionBreakout(request: GoldSessionBreakoutRequestDto) {
+    const symbol = GOLD_SESSION_BREAKOUT_RULES.symbol;
+    const rows = await this.candles.find({
+      where: { symbol, timeframe: 'PERIOD_M15' },
+      order: { openTime: 'ASC' },
+    });
+    const newestM15 = rows.at(-1);
+    if (!newestM15) {
+      throw new BadRequestException(`${symbol} is missing PERIOD_M15 history`);
+    }
+    const selectedM15 = rows
+      .filter(
+        (row) =>
+          row.source === newestM15.source && row.server === newestM15.server,
+      )
+      .slice(-request.maxM15Bars)
+      .map((row) => ({
+        openTime: Number(row.openTime),
+        open: row.open,
+        high: row.high,
+        low: row.low,
+        close: row.close,
+        tickVolume: Number(row.tickVolume),
+      }));
+    const dynamicCost = await this.buildHistoricalCostResolver(
+      symbol,
+      newestM15.source,
+      newestM15.server,
+      selectedM15,
+    );
+    const result = runGoldSessionBreakoutBacktest({
+      symbol,
+      m15: selectedM15,
+      costResolver: dynamicCost.resolver,
+      config: {
+        costModel: 'historical-spread',
+        costBps: 0,
+        minimumSpreadMatchPercent: request.minimumSpreadMatchPercent,
+        trainFraction: request.trainFraction,
+        riskPerTradePercent: request.riskPerTradePercent,
+      },
+    });
+    const { trades, ...publicResult } = result;
+
+    return {
+      generatedAt: new Date().toISOString(),
+      strategy: 'gold-session-volatility-breakout-v1-preregistered',
+      purpose: 'distinct-gold-hypothesis-falsification-not-trading-advice',
+      config: {
+        maxM15Bars: request.maxM15Bars,
+        minimumSpreadMatchPercent: request.minimumSpreadMatchPercent,
+        trainFraction: request.trainFraction,
+        riskPerTradePercent: request.riskPerTradePercent,
+        costModel: 'historical-spread',
+        rules: GOLD_SESSION_BREAKOUT_RULES,
+      },
+      acceptanceCriteria: GOLD_SESSION_BREAKOUT_ACCEPTANCE,
+      executionModel: {
+        signalData: 'closed-M15-candles-only',
+        timestampLabel: 'raw-XM-broker-timestamp-hour-not-UTC',
+        referenceRange: 'broker-hours-01:00-through-07:45',
+        breakoutWindow: 'broker-hours-08:00-through-16:45',
+        entry: GOLD_SESSION_BREAKOUT_RULES.entry,
+        stop: 'range-boundary-distance-with-0.75-ATR-floor',
+        target: '1.5R',
+        maximumHold: '20-M15-bars',
+        positionPolicy: 'first-breakout-only-one-trade-per-broker-day',
+        sameBarStopAndTarget:
+          GOLD_SESSION_BREAKOUT_RULES.sameBarStopAndTarget,
+        transactionCost:
+          'exact-entry-M15-spread-with-window-p75-fallback',
+      },
+      marketDataIdentity: {
+        source: newestM15.source,
+        server: newestM15.server,
+      },
+      executionCostData: dynamicCost.metadata,
+      pooledCostCoverage: publicResult.costCoverage,
+      pooledTradeStatistics: publicResult.all,
+      symbols: [
+        {
+          ...publicResult,
+          recentTradeSample: trades.slice(-5),
+        },
+      ],
+    };
   }
 
   private async runStrategy(

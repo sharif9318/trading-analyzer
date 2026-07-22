@@ -16,10 +16,13 @@ import { EconomicEventCoverageDto } from './dto/economic-event-coverage.dto';
 import { EconomicEventQualityQueryDto } from './dto/economic-event-quality-query.dto';
 import { EconomicEventQueryDto } from './dto/economic-event-query.dto';
 import { HistoricalBackfillDto } from './dto/historical-backfill.dto';
+import { InstrumentCatalogBatchDto } from './dto/instrument-catalog.dto';
 import { MarketSnapshotBatchDto } from './dto/market-snapshot.dto';
 import { QualityQueryDto } from './dto/quality-query.dto';
 import { SpreadBackfillDto } from './dto/spread-backfill.dto';
+import { TradingEconomicsBackfillDto } from './dto/trading-economics-backfill.dto';
 import { MarketDataService } from './market-data.service';
+import { TradingEconomicsService } from './providers/trading-economics.service';
 import { DataQualityService } from './quality/data-quality.service';
 import { EconomicEventQualityService } from './quality/economic-event-quality.service';
 
@@ -29,6 +32,7 @@ export class MarketDataController {
     private readonly marketDataService: MarketDataService,
     private readonly dataQualityService: DataQualityService,
     private readonly economicEventQualityService: EconomicEventQualityService,
+    private readonly tradingEconomicsService: TradingEconomicsService,
     private readonly config: ConfigService,
   ) {}
 
@@ -86,6 +90,23 @@ export class MarketDataController {
     return this.marketDataService.backfillSpreads(batch);
   }
 
+  @Post('instrument-catalog')
+  @HttpCode(202)
+  async instrumentCatalog(
+    @Headers('x-bridge-key') bridgeKey: string | undefined,
+    @Body() batch: InstrumentCatalogBatchDto,
+  ) {
+    this.assertBridgeKey(bridgeKey);
+    return this.marketDataService.upsertInstrumentCatalog(batch);
+  }
+
+  @Get('instruments')
+  async instruments() {
+    return {
+      instruments: await this.marketDataService.instrumentCatalog(),
+    };
+  }
+
   @Post('economic-events/backfill')
   @HttpCode(202)
   async economicEventBackfill(
@@ -106,11 +127,22 @@ export class MarketDataController {
     return this.marketDataService.recordEconomicEventCoverage(coverage);
   }
 
+  @Post('economic-events/providers/trading-economics/backfill')
+  @HttpCode(202)
+  async tradingEconomicsBackfill(
+    @Headers('x-bridge-key') bridgeKey: string | undefined,
+    @Body() request: TradingEconomicsBackfillDto,
+  ) {
+    this.assertBridgeKey(bridgeKey);
+    return this.tradingEconomicsService.backfill(request);
+  }
+
   @Get('economic-events/quality')
   async economicEventQuality(@Query() query: EconomicEventQualityQueryDto) {
     return this.economicEventQualityService.report(
       query.minimumReleases,
       query.maximumStalenessDays,
+      query.source,
     );
   }
 

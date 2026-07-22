@@ -15,6 +15,7 @@ import {
   'currency',
   'rangeFrom',
   'rangeTo',
+  'eventId',
 ])
 @Index('idx_economic_event_coverage_gaps_status', [
   'status',
@@ -39,6 +40,9 @@ export class EconomicEventCoverageGapEntity {
 
   @Column({ name: 'range_to', type: 'bigint' })
   rangeTo!: string;
+
+  @Column({ name: 'event_id', type: 'varchar', length: 32, default: '' })
+  eventId!: string;
 
   @Column({ name: 'error_code', type: 'integer', nullable: true })
   errorCode!: number | null;

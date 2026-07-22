@@ -1,7 +1,9 @@
 import {
+  ArrayMaxSize,
   IsBoolean,
   IsIn,
   IsInt,
+  IsArray,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -34,8 +36,21 @@ export class EconomicEventCoverageDto {
   rangeTo!: number;
 
   @IsString()
-  @IsIn(['complete', 'gap'])
-  status!: 'complete' | 'gap';
+  @IsIn(['complete', 'partial', 'gap'])
+  status!: 'complete' | 'partial' | 'gap';
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d+$/)
+  @MaxLength(32)
+  eventId?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5000)
+  @IsString({ each: true })
+  @Matches(/^\d+$/, { each: true })
+  failedEventIds?: string[];
 
   @IsOptional()
   @IsInt()

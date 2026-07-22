@@ -665,7 +665,7 @@ export function classifyConclusion(
   return 'promising-not-validated';
 }
 
-function buildChronologicalFolds(
+export function buildChronologicalFolds(
   trades: Trade[],
   m15: FeatureRow[],
   riskPerTradePercent: number,

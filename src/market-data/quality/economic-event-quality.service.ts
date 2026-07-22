@@ -21,38 +21,47 @@ export class EconomicEventQualityService {
     private readonly coverageGaps: Repository<EconomicEventCoverageGapEntity>,
   ) {}
 
-  async report(minimumReleases: number, maximumStalenessDays: number) {
+  async report(
+    minimumReleases: number,
+    maximumStalenessDays: number,
+    source?: string,
+  ) {
     const generatedAt = new Date();
     const [releaseRows, definitionRows, orphanReleases, incompleteDefinitions, unsupportedCurrencyReleases, openGapRows] =
       await Promise.all([
-        this.releaseSummary(),
-        this.definitionSummary(),
-        this.orphanReleaseCount(),
+        this.releaseSummary(source),
+        this.definitionSummary(source),
+        this.orphanReleaseCount(source),
         this.definitions
           .createQueryBuilder('definition')
           .where("definition.name = '' OR definition.currency = ''")
+          .andWhere(source ? 'definition.source = :source' : '1 = 1', { source })
           .getCount(),
         this.releases
           .createQueryBuilder('release')
           .where('release.currency NOT IN (:...currencies)', {
             currencies: [...SUPPORTED_EVENT_CURRENCIES],
           })
+          .andWhere(source ? 'release.source = :source' : '1 = 1', { source })
           .getCount(),
         this.coverageGaps
           .createQueryBuilder('gap')
           .select('gap.currency', 'currency')
           .addSelect('gap.rangeFrom', 'rangeFrom')
           .addSelect('gap.rangeTo', 'rangeTo')
+          .addSelect('gap.eventId', 'eventId')
           .addSelect('gap.errorCode', 'errorCode')
           .addSelect('gap.aggregateAttempted', 'aggregateAttempted')
           .addSelect('gap.perEventAttempted', 'perEventAttempted')
           .where('gap.status = :status', { status: 'open' })
+          .andWhere(source ? 'gap.source = :source' : '1 = 1', { source })
           .orderBy('gap.currency', 'ASC')
           .addOrderBy('gap.rangeFrom', 'ASC')
           .getRawMany<{
             currency: string;
             rangeFrom: string;
             rangeTo: string;
+            eventId: string;
             errorCode: number | null;
             aggregateAttempted: boolean;
             perEventAttempted: boolean;
@@ -76,6 +85,7 @@ export class EconomicEventQualityService {
 
     return {
       generatedAt: generatedAt.toISOString(),
+      source: source ?? 'all',
       ...buildEconomicEventQualityReport(
         rows,
         minimumReleases,
@@ -90,6 +100,7 @@ export class EconomicEventQualityService {
           currency: gap.currency,
           rangeFrom: Number(gap.rangeFrom),
           rangeTo: Number(gap.rangeTo),
+          eventId: gap.eventId === '' ? null : gap.eventId,
           errorCode: gap.errorCode === null ? null : Number(gap.errorCode),
           aggregateAttempted: gap.aggregateAttempted,
           perEventAttempted: gap.perEventAttempted,
@@ -98,8 +109,8 @@ export class EconomicEventQualityService {
     };
   }
 
-  private async releaseSummary() {
-    return this.releases
+  private async releaseSummary(source?: string) {
+    const builder = this.releases
       .createQueryBuilder('release')
       .leftJoin(
         EconomicEventDefinitionEntity,
@@ -122,7 +133,9 @@ export class EconomicEventQualityService {
       )
       .addSelect('MIN(release.eventTime)', 'oldestEventTime')
       .addSelect('MAX(release.eventTime)', 'newestEventTime')
-      .groupBy('release.currency')
+      .groupBy('release.currency');
+    if (source) builder.where('release.source = :source', { source });
+    return builder
       .orderBy('release.currency', 'ASC')
       .getRawMany<{
         currency: string;
@@ -135,24 +148,28 @@ export class EconomicEventQualityService {
       }>();
   }
 
-  private async definitionSummary() {
-    return this.definitions
+  private async definitionSummary(source?: string) {
+    const builder = this.definitions
       .createQueryBuilder('definition')
       .select('definition.currency', 'currency')
-      .addSelect('COUNT(*)', 'definitions')
+      .addSelect('COUNT(*)', 'definitions');
+    if (source) builder.where('definition.source = :source', { source });
+    return builder
       .groupBy('definition.currency')
       .getRawMany<{ currency: string; definitions: string }>();
   }
 
-  private async orphanReleaseCount() {
-    return this.releases
+  private async orphanReleaseCount(source?: string) {
+    const builder = this.releases
       .createQueryBuilder('release')
       .leftJoin(
         EconomicEventDefinitionEntity,
         'definition',
         'definition.source = release.source AND definition.eventId = release.eventId',
       )
-      .where('definition.id IS NULL')
+      .where('definition.id IS NULL');
+    if (source) builder.andWhere('release.source = :source', { source });
+    return builder
       .getCount();
   }
 }

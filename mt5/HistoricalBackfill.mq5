@@ -1,5 +1,5 @@
 #property copyright "Trading Analyzer"
-#property version   "1.000"
+#property version   "1.100"
 #property strict
 #property script_show_inputs
 
@@ -12,6 +12,7 @@ input int RequestDelayMs = 100;
 input bool IncludeM15 = true;
 input bool IncludeH1 = true;
 input bool IncludeH4 = true;
+input bool IncludeD1 = false;
 
 void OnStart()
   {
@@ -41,7 +42,7 @@ void OnStart()
       return;
      }
 
-   ENUM_TIMEFRAMES timeframes[3];
+   ENUM_TIMEFRAMES timeframes[4];
    int timeframe_count = 0;
    if(IncludeM15)
       timeframes[timeframe_count++] = PERIOD_M15;
@@ -49,6 +50,8 @@ void OnStart()
       timeframes[timeframe_count++] = PERIOD_H1;
    if(IncludeH4)
       timeframes[timeframe_count++] = PERIOD_H4;
+   if(IncludeD1)
+      timeframes[timeframe_count++] = PERIOD_D1;
 
    if(timeframe_count == 0)
      {

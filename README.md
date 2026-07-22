@@ -1,4 +1,4 @@
-# Trading Analyzer — Phase 5.5.2
+# Trading Analyzer — Phase 5.8A
 
 This is a read-only XM MetaTrader 5 to NestJS market-data pipeline. The live EA
 publishes newly closed candles, a separate MT5 script imports history, and
@@ -20,8 +20,45 @@ preserving V1 unchanged as the rejected baseline.
 Phase 5.5 adds an independent MetaTrader economic-calendar dataset, integrity
 gate, and audit API. Events are not yet allowed to filter trades or generate
 signals. Phase 5.5.2 records irrecoverable MT5 calendar timeouts as explicit
-coverage gaps and continues importing later dates without presenting the
-dataset as complete.
+coverage gaps. Phase 5.5.3 narrows per-event timeouts to the exact failing
+MetaQuotes event ID, imports the other events from the same day, and continues
+without presenting partial coverage as complete.
+Phase 5.6 adds an isolated Trading Economics calendar adapter after systematic
+MetaTrader calendar-service timeouts made the native historical source
+unusable. The adapter stores UTC schedules, event identity, and importance
+only. It does not import mutable actual, previous, or forecast values and does
+not connect events to a strategy.
+Phase 5.7 freezes calendar research as dormant and adds a preregistered,
+gold-only session-volatility breakout. This hypothesis uses M15 price data and
+historical spread costs only; it shares no entry filter with the rejected
+trend-pullback family.
+Phase 5.8A begins the preregistered diversified daily trend experiment. It does
+not run a partial backtest. It first captures the broker's exact instrument
+catalog, contract fields, current quote, and swap specification, and adds D1
+history import. The eventual portfolio test remains blocked until at least 20
+eligible instruments across three asset classes have adequate D1 coverage and
+an auditable financing-cost treatment.
+
+## Phase 5.8A: discover the exact XM universe
+
+Copy `mt5/InstrumentCatalog.mq5` to `MQL5/Scripts`, compile it, and run one
+instance with the existing backend URL and bridge key. Keep
+`IncludeUnselectedSymbols=true`. It uploads metadata only and never places an
+order.
+
+After it prints `Instrument catalog finished`, inspect the candidates:
+
+```bash
+curl -s http://127.0.0.1:3001/market-data/instruments \
+  | python3 -m json.tool
+```
+
+The `candidateAssetClass` field is intentionally only a first-pass label based
+on the broker path and description. The final universe must be frozen before
+any portfolio result is inspected.
+
+`HistoricalBackfill.mq5` now also exposes `IncludeD1`. Do not start a bulk D1
+backfill until the eligible universe has been selected from the catalog.
 
 ## Architecture
 
@@ -58,6 +95,9 @@ POSTGRES_USER=trading_analyzer
 POSTGRES_PASSWORD=local_dev_password
 POSTGRES_PORT=5433
 ```
+
+Leave `TRADING_ECONOMICS_API_KEY` empty. The paid calendar provider is outside
+the active research scope.
 
 The password is only for this local development container. Use managed secrets
 and a strong password before any deployment.
@@ -433,7 +473,12 @@ Economic events are intentionally not included in V2A. They will be tested as
 a separately attributable risk filter only after the confirmation hypothesis
 has been measured.
 
-## 12. Backfill the MT5 economic calendar
+## 12. Dormant: MT5 economic calendar
+
+Economic-calendar research is no longer active because reliable historical
+coverage requires a paid provider and is not necessary to falsify the current
+price-only hypotheses. Do not run this importer. The code and schema remain
+for auditability only; no strategy joins candles to these records.
 
 Phase 5.5 stores event definitions separately from timestamped releases. This
 preserves MetaQuotes event/value IDs, currencies, importance, release values,
@@ -471,11 +516,12 @@ The API URL uses the same already-approved `http://127.0.0.1:3001` WebRequest
 base. This is a one-time script, not another continuously attached EA. It
 queries calendar history in small ranges, resolves event and country metadata,
 uploads batches, reports unresolved definitions, and exits. If MetaTrader
-returns calendar timeout `5401`, version `1.003` automatically shrinks that
+returns calendar timeout `5401`, version `1.004` automatically shrinks that
 request window down to one day. If the aggregate one-day query still times
-out, it uses MetaQuotes' per-event history API. If both paths time out, it
-posts the exact one-day interval as an open coverage gap and continues with
-later dates. A later successful rerun resolves any fully covered gap.
+out, it uses MetaQuotes' per-event history API. A timed-out event is recorded
+with its exact event ID while the remaining events from that day are imported.
+Only a failure of the fallback itself creates a full-day gap. A later successful
+rerun resolves recovered event-specific or full-day gaps.
 
 If an earlier run stopped partway through, rerun only its failed currencies.
 For example, use `USD,EUR,GBP,JPY,AUD` in `CurrenciesCsv`. The database upserts
@@ -494,7 +540,7 @@ currencies, a newest release no more than the configured number of days old,
 and zero orphan releases, incomplete definitions, unsupported currency
 records, or open coverage gaps. `collecting` means coverage is incomplete. A
 currency becomes `stale` when an import stopped too far in the past and `gap`
-when at least one recorded interval could not be retrieved. Both conditions
+when at least one recorded interval or event could not be retrieved. Both conditions
 make the overall status `investigate`; integrity failures do the same.
 
 Inspect recent high-importance USD releases:
@@ -514,13 +560,13 @@ docker compose exec postgres psql \
   -c "SELECT currency, count(*) FROM economic_event_releases GROUP BY currency ORDER BY currency;"
 ```
 
-Inspect open intervals that future event backtests must exclude:
+Inspect open intervals and event IDs that future event backtests must exclude:
 
 ```bash
 docker compose exec postgres psql \
   -U trading_analyzer \
   -d trading_analyzer \
-  -c "SELECT currency, range_from, range_to, error_code FROM economic_event_coverage_gaps WHERE status = 'open' ORDER BY currency, range_from;"
+  -c "SELECT currency, range_from, range_to, NULLIF(event_id, '') AS event_id, error_code FROM economic_event_coverage_gaps WHERE status = 'open' ORDER BY currency, range_from, event_id;"
 ```
 
 Phase 5.5 does not use actual, forecast, or surprise values in a backtest.
@@ -528,6 +574,127 @@ Historical backfill gives the current calendar history snapshot, not proof of
 what a trader knew at every original publication instant. The first permitted
 event experiment will therefore use only currency, scheduled time, event
 identity, and importance.
+
+## 13. Dormant: Trading Economics replacement source
+
+Do not purchase or configure Trading Economics for this project. This adapter
+is retained but is outside the active research scope.
+
+Do not continue retrying the MT5 historical calendar importer when it produces
+systematic `5401` timeouts. Phase 5.6 can retrieve a separate calendar source
+through NestJS. Its records use:
+
+- `source=trading-economics-calendar`;
+- `server=utc`;
+- calendar-only values (`actual`, `previous`, and `forecast` remain null).
+
+First validate one currency over one weekday-heavy week. This small call avoids
+consuming a trial allowance on an unverified full import:
+
+```bash
+curl -sS -X POST \
+  'http://127.0.0.1:3001/market-data/economic-events/providers/trading-economics/backfill' \
+  -H "x-bridge-key: $BRIDGE_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "from":"2026-07-13",
+    "to":"2026-07-17",
+    "currencies":["USD"],
+    "minimumImportance":1
+  }' | python3 -m json.tool
+```
+
+Inspect only the replacement source:
+
+```bash
+curl -s \
+  'http://127.0.0.1:3001/market-data/economic-events?source=trading-economics-calendar&currency=USD&importance=3&limit=20' \
+  | python3 -m json.tool
+```
+
+Run its source-specific quality report so old MT5 coverage gaps do not pollute
+the result:
+
+```bash
+curl -s \
+  'http://127.0.0.1:3001/market-data/economic-events/quality?source=trading-economics-calendar&minimumReleases=20&maximumStalenessDays=14' \
+  | python3 -m json.tool
+```
+
+Trading Economics timestamps are stored as UTC. Existing XM candle timestamps
+remain raw broker-server seconds, so Phase 5.6 deliberately does not perform an
+event/candle join.
+
+## 14. Falsify the preregistered GOLD# session breakout
+
+Phase 5.7 tests one genuinely distinct, gold-only hypothesis. It does not reuse
+the rejected trend-pullback signals and does not use an economic calendar.
+Strategy constants are frozen in code and cannot be changed through the API:
+
+- instrument: `GOLD#` only;
+- reference range: raw XM broker hours `01:00` through `07:45`;
+- eligible signal window: broker hours `08:00` through `16:45`;
+- signal: the first M15 candle that closes strictly outside the completed
+  reference range;
+- entry: the following M15 open;
+- stop distance: distance back to the broken range boundary, with a `0.75 ATR`
+  minimum;
+- target: `1.5R`;
+- timeout: `20` M15 bars;
+- at most one trade per broker day;
+- conservative stop-first treatment of same-bar stop/target collisions;
+- historical spread cost from the exact entry bucket, with the existing P75
+  fallback and a minimum `95%` exact-match gate.
+
+The reference range must contain all 28 consecutive M15 bars. Incomplete days
+are skipped rather than repaired or synthesized. “Broker hour” is a label for
+the raw XM timestamp convention; it is not claimed to be UTC.
+
+Run the preregistered test once without changing its rules:
+
+```bash
+curl -sS -X POST \
+  'http://127.0.0.1:3001/backtests/gold-session-breakout' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "maxM15Bars":10000,
+    "minimumSpreadMatchPercent":95
+  }' > /tmp/gold-session-breakout-v1.json
+```
+
+Print the decision record:
+
+```bash
+python3 - <<'PY'
+import json
+
+with open('/tmp/gold-session-breakout-v1.json') as file:
+    report = json.load(file)
+
+print('strategy:', report['strategy'])
+print('rules:', report['config']['rules'])
+print('acceptance criteria:', report['acceptanceCriteria'])
+print('cost coverage:', report['pooledCostCoverage'])
+print('all trades:', report['pooledTradeStatistics'])
+
+for item in report['symbols']:
+    print('symbol:', item['symbol'])
+    print('conclusion:', item['conclusion'])
+    print('sessions:', item['sessionDiagnostics'])
+    print('acceptance:', item['acceptance'])
+    print('in sample:', item['inSample'])
+    print('out of sample:', item['outOfSample'])
+    print('profitable folds:', item['profitableFolds'], '/ 5')
+PY
+```
+
+The screen can receive `promising-not-validated` only when all preregistered
+checks pass: at least 20 OOS trades, at least `0.05R` average OOS net
+expectancy, OOS profit factor at least `1.10`, at least three of five profitable
+chronological folds, OOS drawdown no more than `10%`, at least five OOS trades
+in each direction, and positive in-sample expectancy. Passing is permission for
+further validation only—not for live signals. Any failed result is recorded
+without changing the session, stop, target, or time-window constants.
 
 ## Database lifecycle
 
@@ -567,4 +734,7 @@ deliberately intend to delete all stored candles.
   snapshots. They must not be used as pre-release model features.
 - Economic events are stored and auditable but are not connected to either
   rejected strategy.
+- Economic-calendar collection and paid-provider research are dormant.
+- External UTC events cannot be joined to raw XM server timestamps until a
+  broker-offset history has been calibrated and verified.
 - No approved live signals, notifications, position sizing, or orders exist.

@@ -7,6 +7,7 @@ import { EconomicEventBackfillDto } from './dto/economic-event-backfill.dto';
 import { EconomicEventCoverageDto } from './dto/economic-event-coverage.dto';
 import { EconomicEventQueryDto } from './dto/economic-event-query.dto';
 import { HistoricalBackfillDto } from './dto/historical-backfill.dto';
+import { InstrumentCatalogBatchDto } from './dto/instrument-catalog.dto';
 import { MarketSnapshotBatchDto } from './dto/market-snapshot.dto';
 import { SpreadBackfillDto } from './dto/spread-backfill.dto';
 import { EconomicEventDefinitionEntity } from './entities/economic-event-definition.entity';
@@ -14,6 +15,11 @@ import { EconomicEventCoverageGapEntity } from './entities/economic-event-covera
 import { EconomicEventReleaseEntity } from './entities/economic-event-release.entity';
 import { MarketCandleEntity } from './entities/market-candle.entity';
 import { SpreadObservationEntity } from './entities/spread-observation.entity';
+import { InstrumentCatalogEntity } from './entities/instrument-catalog.entity';
+import {
+  inferCandidateAssetClass,
+  midpointSpreadBps,
+} from './instrument-catalog';
 
 export interface StoredSnapshot {
   symbol: string;
@@ -48,6 +54,8 @@ export class MarketDataService {
     private readonly economicEventReleases: Repository<EconomicEventReleaseEntity>,
     @InjectRepository(EconomicEventCoverageGapEntity)
     private readonly economicEventCoverageGaps: Repository<EconomicEventCoverageGapEntity>,
+    @InjectRepository(InstrumentCatalogEntity)
+    private readonly instruments: Repository<InstrumentCatalogEntity>,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -230,6 +238,79 @@ export class MarketDataService {
     };
   }
 
+  async upsertInstrumentCatalog(batch: InstrumentCatalogBatchDto) {
+    const invalidQuote = batch.instruments.find(
+      (item) =>
+        (item.bid === 0) !== (item.ask === 0) ||
+        (item.bid > 0 && item.ask < item.bid),
+    );
+    if (invalidQuote) {
+      throw new BadRequestException(
+        `Instrument ${invalidQuote.symbol} requires bid/ask both zero or ask >= bid > 0`,
+      );
+    }
+
+    const rows = batch.instruments.map((item) =>
+      this.instruments.create({
+        ...item,
+        source: batch.source,
+        server: batch.server,
+        bid: item.bid > 0 ? item.bid : null,
+        ask: item.ask > 0 ? item.ask : null,
+        observedAt: String(batch.generatedAt),
+      }),
+    );
+    await this.instruments.upsert(rows, {
+      conflictPaths: ['source', 'server', 'symbol'],
+      skipUpdateIfNoValuesChanged: true,
+    });
+
+    return {
+      received: batch.instruments.length,
+      upserted: rows.length,
+      source: batch.source,
+      server: batch.server,
+      generatedAt: batch.generatedAt,
+    };
+  }
+
+  async instrumentCatalog() {
+    const rows = await this.instruments.find({
+      order: { path: 'ASC', symbol: 'ASC' },
+    });
+    return rows.map((row) => ({
+      source: row.source,
+      server: row.server,
+      symbol: row.symbol,
+      path: row.path,
+      description: row.description,
+      candidateAssetClass: inferCandidateAssetClass(
+        row.path,
+        row.description,
+        row.currencyBase,
+        row.currencyProfit,
+      ),
+      currencyBase: row.currencyBase,
+      currencyProfit: row.currencyProfit,
+      currencyMargin: row.currencyMargin,
+      tradeMode: row.tradeMode,
+      digits: row.digits,
+      point: row.point,
+      contractSize: row.contractSize,
+      tickSize: row.tickSize,
+      tickValue: row.tickValue,
+      swapMode: row.swapMode,
+      swapLong: row.swapLong,
+      swapShort: row.swapShort,
+      swapRollover3Days: row.swapRollover3Days,
+      bid: row.bid,
+      ask: row.ask,
+      currentSpreadBps: midpointSpreadBps(row.bid, row.ask),
+      observedAt: Number(row.observedAt),
+      updatedAt: row.updatedAt.toISOString(),
+    }));
+  }
+
   async backfillEconomicEvents(batch: EconomicEventBackfillDto) {
     const definitionsByEventId = new Map<
       string,
@@ -317,6 +398,26 @@ export class MarketDataService {
     if (coverage.status === 'gap' && coverage.errorCode === undefined) {
       throw new BadRequestException('Economic event coverage gaps require errorCode');
     }
+    if (coverage.status === 'partial' && !coverage.perEventAttempted) {
+      throw new BadRequestException(
+        'Partial economic event coverage requires per-event retrieval',
+      );
+    }
+    if (coverage.status === 'partial' && !coverage.failedEventIds?.length) {
+      throw new BadRequestException(
+        'Partial economic event coverage requires failedEventIds',
+      );
+    }
+    if (coverage.status !== 'partial' && coverage.failedEventIds !== undefined) {
+      throw new BadRequestException(
+        'failedEventIds is only valid for partial economic event coverage',
+      );
+    }
+    if (coverage.status !== 'gap' && coverage.eventId !== undefined) {
+      throw new BadRequestException(
+        'eventId is only valid for economic event coverage gaps',
+      );
+    }
 
     if (coverage.status === 'gap') {
       await this.economicEventCoverageGaps.upsert(
@@ -326,6 +427,7 @@ export class MarketDataService {
           currency: coverage.currency,
           rangeFrom: String(coverage.rangeFrom),
           rangeTo: String(coverage.rangeTo),
+          eventId: coverage.eventId ?? '',
           errorCode: coverage.errorCode ?? null,
           aggregateAttempted: coverage.aggregateAttempted,
           perEventAttempted: coverage.perEventAttempted,
@@ -333,13 +435,20 @@ export class MarketDataService {
           resolvedAt: null,
         }),
         {
-          conflictPaths: ['source', 'server', 'currency', 'rangeFrom', 'rangeTo'],
+          conflictPaths: [
+            'source',
+            'server',
+            'currency',
+            'rangeFrom',
+            'rangeTo',
+            'eventId',
+          ],
         },
       );
       return { ...coverage, recorded: 'open-gap' };
     }
 
-    const result = await this.economicEventCoverageGaps
+    let builder = this.economicEventCoverageGaps
       .createQueryBuilder()
       .update(EconomicEventCoverageGapEntity)
       .set({ status: 'resolved', resolvedAt: new Date() })
@@ -348,8 +457,16 @@ export class MarketDataService {
       .andWhere('currency = :currency', { currency: coverage.currency })
       .andWhere('status = :status', { status: 'open' })
       .andWhere('range_from >= :rangeFrom', { rangeFrom: String(coverage.rangeFrom) })
-      .andWhere('range_to <= :rangeTo', { rangeTo: String(coverage.rangeTo) })
-      .execute();
+      .andWhere('range_to <= :rangeTo', { rangeTo: String(coverage.rangeTo) });
+
+    if (coverage.status === 'partial') {
+      builder = builder.andWhere(
+        "event_id = '' OR event_id NOT IN (:...failedEventIds)",
+        { failedEventIds: coverage.failedEventIds },
+      );
+    }
+
+    const result = await builder.execute();
 
     return { ...coverage, resolvedGaps: result.affected ?? 0 };
   }
@@ -393,6 +510,11 @@ export class MarketDataService {
     if (query.currency) {
       builder = builder.andWhere('release.currency = :currency', {
         currency: query.currency,
+      });
+    }
+    if (query.source) {
+      builder = builder.andWhere('release.source = :source', {
+        source: query.source,
       });
     }
     if (query.importance !== undefined) {

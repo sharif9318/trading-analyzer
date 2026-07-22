@@ -66,6 +66,14 @@ export interface Trade {
     h1EmaSeparationPercent: number;
     h4EmaSeparationPercent: number;
   };
+  sessionContext?: {
+    brokerDate: string;
+    referenceHigh: number;
+    referenceLow: number;
+    referenceMidpoint: number;
+    referenceRangePercent: number;
+    breakoutDistanceAtr: number;
+  };
   grossR: number;
   netR: number;
   confirmationBars?: number;

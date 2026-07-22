@@ -7,6 +7,8 @@ import { CreateMarketCandles1784340000000 } from './database/migrations/17843400
 import { CreateSpreadObservations1784682000000 } from './database/migrations/1784682000000-create-spread-observations';
 import { CreateEconomicEvents1784768400000 } from './database/migrations/1784768400000-create-economic-events';
 import { AddEconomicEventCoverageGaps1784772000000 } from './database/migrations/1784772000000-add-economic-event-coverage-gaps';
+import { AddEventSpecificEconomicEventGaps1784775600000 } from './database/migrations/1784775600000-add-event-specific-economic-event-gaps';
+import { CreateInstrumentCatalog1784862000000 } from './database/migrations/1784862000000-create-instrument-catalog';
 import { MarketDataModule } from './market-data/market-data.module';
 
 @Module({
@@ -26,6 +28,8 @@ import { MarketDataModule } from './market-data/market-data.module';
           CreateSpreadObservations1784682000000,
           CreateEconomicEvents1784768400000,
           AddEconomicEventCoverageGaps1784772000000,
+          AddEventSpecificEconomicEventGaps1784775600000,
+          CreateInstrumentCatalog1784862000000,
         ],
         retryAttempts: 10,
         retryDelay: 3000,
