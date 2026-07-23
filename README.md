@@ -1,4 +1,4 @@
-# Trading Analyzer — Phase 5.8A
+# Trading Analyzer — Phase 5.8B.1
 
 This is a read-only XM MetaTrader 5 to NestJS market-data pipeline. The live EA
 publishes newly closed candles, a separate MT5 script imports history, and
@@ -38,6 +38,109 @@ catalog, contract fields, current quote, and swap specification, and adds D1
 history import. The eventual portfolio test remains blocked until at least 20
 eligible instruments across three asset classes have adequate D1 coverage and
 an auditable financing-cost treatment.
+Phase 5.8B freezes the 27-symbol research universe and collects M15, H1, and D1
+history from 2020 onward. Each historical bar carries MT5's broker-reported
+spread, so cost coverage no longer requires a multi-year raw-tick download.
+It also records minimum lot, lot step, broker-calculated minimum margin, and
+the account-currency loss of a 1% adverse move at minimum volume. A strict
+preflight endpoint blocks research when any required price, spread, or
+execution evidence is missing.
+Phase 5.8B.1 corrects the M15 importer after the terminal bar limit blocked
+most requests at the 2020 boundary. The importer now refuses to start when
+`TERMINAL_MAXBARS` cannot cover the fixed date range, reads the broker's first
+server date, and logs the actual first imported candle. The unchanged preflight
+still rejects a series whose broker coverage genuinely starts too late.
+
+## Phase 5.8B.1: resume failed M15 series
+
+If the first Phase 5.8B run completed 56 series and failed 25:
+
+1. In MT5, open `Tools > Options > Charts`.
+2. Set `Max bars in chart` to `Unlimited`.
+3. Click OK and fully restart MT5; this setting requires a restart.
+4. Copy and compile the corrected `mt5/ResearchHistoryBackfill.mq5`.
+5. Run it with:
+
+- `StartTime`: `2020.01.01 00:00`;
+- `EndTime`: `0`;
+- `IncludeM15`: `true`;
+- `IncludeH1`: `false`;
+- `IncludeD1`: `false`;
+- `BatchSize`: `200`;
+- `RequestDelayMs`: `50`.
+
+Existing candles are protected by the database uniqueness constraint, so the
+two previously completed M15 series can be resent safely. The script reports
+the actual first available broker candle for every symbol and enforces the
+fixed `StartTime`; it cannot be moved forward to force the preflight to pass.
+
+## Phase 5.8B: collect research-ready history
+
+The universe is fixed in code at 27 XM Ultra Low instruments:
+
+- 12 FX pairs;
+- 5 spot metal/energy instruments;
+- 10 cash equity indices.
+
+Changing a symbol or class creates a different experiment. Expiring futures,
+stocks, crypto, and thematic indices remain excluded.
+
+First rerun the updated `InstrumentCatalog.mq5` with
+`ResearchUniverseOnly=true`. This captures the new minimum-volume and margin
+fields for exactly the frozen universe. Wait for:
+
+```text
+Research instrument specifications finished. Uploaded symbols: 27
+```
+
+Then copy and compile `mt5/ResearchHistoryBackfill.mq5`. Keep its default
+research inputs:
+
+- `StartTime`: `2020.01.01 00:00`;
+- `EndTime`: `0` (latest available server history);
+- `IncludeM15`, `IncludeH1`, `IncludeD1`: `true`;
+- `BatchSize`: `200`;
+- `RequestDelayMs`: `50`.
+
+The script uses bounded date chunks, excludes forming candles, and is safe to
+rerun. It imports broker bar spreads alongside price history. A zero spread is
+treated as missing evidence rather than as free execution.
+
+When the importer finishes, run the fixed preflight for the $60 validation
+account:
+
+```bash
+curl -s \
+  'http://127.0.0.1:3001/market-data/research-universe/preflight?accountBalance=60' \
+  > /tmp/research-preflight.json
+
+python3 - <<'PY'
+import json
+
+with open('/tmp/research-preflight.json') as file:
+    report = json.load(file)
+
+print('phase:', report['phase'])
+print('universe:', report['universeSize'], report['classCounts'])
+print('requirements:', report['requirements'])
+print('summary:', report['summary'])
+
+for item in report['instruments']:
+    if not item['dataReady'] or not item['execution']['executableAtMinimumVolume']:
+        print('symbol:', item['symbol'])
+        print('  class:', item['assetClass'])
+        print('  catalog ready:', item['catalogReady'])
+        print('  account:', item['accountCurrency'], item['accountLeverage'])
+        print('  execution:', item['execution'])
+        print('  history:', item['history'])
+PY
+```
+
+`researchReady` requires all 27 symbols to pass fixed price and 95% spread
+coverage gates. `liveValidationReady` is stricter: all 27 must also fit the
+$60 account at minimum volume under the preregistered margin and sizing
+granularity limits. Phase 5.8B does not place orders and does not yet run a
+strategy backtest.
 
 ## Phase 5.8A: discover the exact XM universe
 

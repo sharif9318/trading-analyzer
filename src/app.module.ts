@@ -9,6 +9,7 @@ import { CreateEconomicEvents1784768400000 } from './database/migrations/1784768
 import { AddEconomicEventCoverageGaps1784772000000 } from './database/migrations/1784772000000-add-economic-event-coverage-gaps';
 import { AddEventSpecificEconomicEventGaps1784775600000 } from './database/migrations/1784775600000-add-event-specific-economic-event-gaps';
 import { CreateInstrumentCatalog1784862000000 } from './database/migrations/1784862000000-create-instrument-catalog';
+import { AddInstrumentExecutionSpecs1784948400000 } from './database/migrations/1784948400000-add-instrument-execution-specs';
 import { MarketDataModule } from './market-data/market-data.module';
 
 @Module({
@@ -30,6 +31,7 @@ import { MarketDataModule } from './market-data/market-data.module';
           AddEconomicEventCoverageGaps1784772000000,
           AddEventSpecificEconomicEventGaps1784775600000,
           CreateInstrumentCatalog1784862000000,
+          AddInstrumentExecutionSpecs1784948400000,
         ],
         retryAttempts: 10,
         retryDelay: 3000,

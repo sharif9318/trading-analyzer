@@ -38,6 +38,12 @@ export class InstrumentCatalogEntity {
   @Column({ name: 'currency_margin', type: 'varchar', length: 16 })
   currencyMargin!: string;
 
+  @Column({ name: 'account_currency', type: 'varchar', length: 16, default: '' })
+  accountCurrency!: string;
+
+  @Column({ name: 'account_leverage', type: 'integer', default: 0 })
+  accountLeverage!: number;
+
   @Column({ name: 'trade_mode', type: 'integer' })
   tradeMode!: number;
 
@@ -55,6 +61,53 @@ export class InstrumentCatalogEntity {
 
   @Column({ name: 'tick_value', type: 'double precision' })
   tickValue!: number;
+
+  @Column({ name: 'calculation_mode', type: 'integer', default: 0 })
+  calculationMode!: number;
+
+  @Column({ name: 'volume_min', type: 'double precision', default: 0 })
+  volumeMin!: number;
+
+  @Column({ name: 'volume_max', type: 'double precision', default: 0 })
+  volumeMax!: number;
+
+  @Column({ name: 'volume_step', type: 'double precision', default: 0 })
+  volumeStep!: number;
+
+  @Column({ name: 'volume_limit', type: 'double precision', default: 0 })
+  volumeLimit!: number;
+
+  @Column({ name: 'margin_initial', type: 'double precision', default: 0 })
+  marginInitial!: number;
+
+  @Column({ name: 'margin_maintenance', type: 'double precision', default: 0 })
+  marginMaintenance!: number;
+
+  @Column({ name: 'minimum_margin_buy', type: 'double precision', nullable: true })
+  minimumMarginBuy!: number | null;
+
+  @Column({ name: 'minimum_margin_sell', type: 'double precision', nullable: true })
+  minimumMarginSell!: number | null;
+
+  @Column({
+    name: 'minimum_one_percent_loss_buy',
+    type: 'double precision',
+    nullable: true,
+  })
+  minimumOnePercentLossBuy!: number | null;
+
+  @Column({
+    name: 'minimum_one_percent_loss_sell',
+    type: 'double precision',
+    nullable: true,
+  })
+  minimumOnePercentLossSell!: number | null;
+
+  @Column({ name: 'trade_stops_level', type: 'integer', default: 0 })
+  tradeStopsLevel!: number;
+
+  @Column({ name: 'trade_freeze_level', type: 'integer', default: 0 })
+  tradeFreezeLevel!: number;
 
   @Column({ name: 'swap_mode', type: 'integer' })
   swapMode!: number;

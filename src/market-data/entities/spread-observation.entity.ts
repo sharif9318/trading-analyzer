@@ -55,7 +55,7 @@ export class SpreadObservationEntity {
   batchGeneratedAt!: string;
 
   @Column({ name: 'ingestion_kind', type: 'varchar', length: 24 })
-  ingestionKind!: 'live' | 'historical-tick';
+  ingestionKind!: 'live' | 'historical-tick' | 'historical-bar';
 
   @CreateDateColumn({ name: 'received_at', type: 'timestamptz' })
   receivedAt!: Date;

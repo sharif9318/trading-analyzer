@@ -23,6 +23,11 @@ const {
   inferCandidateAssetClass,
   midpointSpreadBps,
 } = require('../dist/market-data/instrument-catalog');
+const {
+  assessMinimumTradeFeasibility,
+  FROZEN_RESEARCH_UNIVERSE,
+  spreadCoveragePercent,
+} = require('../dist/market-data/research-universe');
 
 function candle(openTime, overrides = {}) {
   return {
@@ -260,6 +265,55 @@ test('instrument catalog spread calculation rejects absent quotes', () => {
   assert.equal(midpointSpreadBps(0, 0), null);
   assert.equal(midpointSpreadBps(2, 1), null);
   assert.ok(Math.abs(midpointSpreadBps(99, 101) - 200) < 1e-12);
+});
+
+test('phase 5.8B research universe is frozen at 27 instruments across three classes', () => {
+  assert.equal(FROZEN_RESEARCH_UNIVERSE.length, 27);
+  assert.deepEqual(
+    Object.fromEntries(
+      ['fx', 'commodity', 'equity-index'].map((assetClass) => [
+        assetClass,
+        FROZEN_RESEARCH_UNIVERSE.filter(
+          (item) => item.assetClass === assetClass,
+        ).length,
+      ]),
+    ),
+    { fx: 12, commodity: 5, 'equity-index': 10 },
+  );
+  assert.equal(
+    new Set(FROZEN_RESEARCH_UNIVERSE.map((item) => item.symbol)).size,
+    27,
+  );
+});
+
+test('minimum trade feasibility requires both margin and risk evidence', () => {
+  const feasible = assessMinimumTradeFeasibility({
+    accountBalance: 60,
+    minimumMarginBuy: 10,
+    minimumMarginSell: 11,
+    minimumOnePercentLossBuy: 2,
+    minimumOnePercentLossSell: 2.5,
+  });
+  assert.equal(feasible.executableAtMinimumVolume, true);
+  assert.equal(feasible.marginSharePercent, 18.3333);
+  assert.equal(feasible.onePercentMoveRiskPercent, 4.1667);
+
+  const missing = assessMinimumTradeFeasibility({
+    accountBalance: 60,
+    minimumMarginBuy: null,
+    minimumMarginSell: null,
+    minimumOnePercentLossBuy: null,
+    minimumOnePercentLossSell: null,
+  });
+  assert.equal(missing.executableAtMinimumVolume, false);
+  assert.equal(missing.hasMarginEvidence, false);
+  assert.equal(missing.hasRiskEvidence, false);
+});
+
+test('spread coverage is capped at 100 percent and rejects empty history', () => {
+  assert.equal(spreadCoveragePercent(100, 95), 95);
+  assert.equal(spreadCoveragePercent(100, 105), 100);
+  assert.equal(spreadCoveragePercent(0, 0), 0);
 });
 
 test('gold reference session requires all 28 consecutive M15 broker-time bars', () => {

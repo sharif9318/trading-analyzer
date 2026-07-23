@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
+import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { spreadBps } from '../analysis/spreads';
 import { CandleQueryDto } from './dto/candle-query.dto';
 import { EconomicEventBackfillDto } from './dto/economic-event-backfill.dto';
@@ -9,6 +9,7 @@ import { EconomicEventQueryDto } from './dto/economic-event-query.dto';
 import { HistoricalBackfillDto } from './dto/historical-backfill.dto';
 import { InstrumentCatalogBatchDto } from './dto/instrument-catalog.dto';
 import { MarketSnapshotBatchDto } from './dto/market-snapshot.dto';
+import { ResearchPreflightQueryDto } from './dto/research-preflight-query.dto';
 import { SpreadBackfillDto } from './dto/spread-backfill.dto';
 import { EconomicEventDefinitionEntity } from './entities/economic-event-definition.entity';
 import { EconomicEventCoverageGapEntity } from './entities/economic-event-coverage-gap.entity';
@@ -20,6 +21,14 @@ import {
   inferCandidateAssetClass,
   midpointSpreadBps,
 } from './instrument-catalog';
+import {
+  assessMinimumTradeFeasibility,
+  FROZEN_RESEARCH_UNIVERSE,
+  MINIMUM_SPREAD_COVERAGE_PERCENT,
+  RESEARCH_HISTORY_START,
+  RESEARCH_REQUIRED_TIMEFRAMES,
+  spreadCoveragePercent,
+} from './research-universe';
 
 export interface StoredSnapshot {
   symbol: string;
@@ -163,7 +172,7 @@ export class MarketDataService {
         tickVolume: String(candle.tickVolume),
         observedBid: null,
         observedAsk: null,
-        observedSpreadPoints: null,
+        observedSpreadPoints: candle.spreadPoints ?? null,
         tickTime: null,
         batchGeneratedAt: String(batch.generatedAt),
         ingestionKind: 'historical',
@@ -181,12 +190,53 @@ export class MarketDataService {
 
     const inserted = Array.isArray(result.raw) ? result.raw.length : 0;
 
+    const spreadRows =
+      batch.point === undefined
+        ? []
+        : batch.candles
+            .filter((candle) => (candle.spreadPoints ?? 0) > 0)
+            .map((candle) => {
+              const bid = candle.open;
+              const ask = bid + (candle.spreadPoints ?? 0) * batch.point!;
+              return this.spreads.create({
+                source: batch.source,
+                server: batch.server,
+                symbol: batch.symbol,
+                timeframe: batch.timeframe,
+                bucketOpenTime: String(candle.time),
+                observedAtMsc: String(candle.time * 1000),
+                bid,
+                ask,
+                spreadBps: spreadBps(bid, ask),
+                batchGeneratedAt: String(batch.generatedAt),
+                ingestionKind: 'historical-bar',
+              });
+            });
+
+    const spreadResult = spreadRows.length
+      ? await this.spreads
+          .createQueryBuilder()
+          .insert()
+          .into(SpreadObservationEntity)
+          .values(spreadRows)
+          .orIgnore()
+          .returning(['id'])
+          .execute()
+      : null;
+    const spreadObservationsInserted = Array.isArray(spreadResult?.raw)
+      ? spreadResult.raw.length
+      : 0;
+
     return {
       symbol: batch.symbol,
       timeframe: batch.timeframe,
       received: batch.candles.length,
       inserted,
       duplicates: batch.candles.length - inserted,
+      spreadObservationsReceived: spreadRows.length,
+      spreadObservationsInserted,
+      spreadObservationsDuplicated:
+        spreadRows.length - spreadObservationsInserted,
     };
   }
 
@@ -250,16 +300,31 @@ export class MarketDataService {
       );
     }
 
-    const rows = batch.instruments.map((item) =>
-      this.instruments.create({
-        ...item,
+    const rows = batch.instruments.map((item) => {
+      const {
+        minimumMarginBuy,
+        minimumMarginSell,
+        minimumOnePercentLossBuy,
+        minimumOnePercentLossSell,
+        ...catalogItem
+      } = item;
+      return this.instruments.create({
+        ...catalogItem,
+        accountCurrency: batch.accountCurrency,
+        accountLeverage: batch.accountLeverage,
+        minimumMarginBuy: minimumMarginBuy > 0 ? minimumMarginBuy : null,
+        minimumMarginSell: minimumMarginSell > 0 ? minimumMarginSell : null,
+        minimumOnePercentLossBuy:
+          minimumOnePercentLossBuy > 0 ? minimumOnePercentLossBuy : null,
+        minimumOnePercentLossSell:
+          minimumOnePercentLossSell > 0 ? minimumOnePercentLossSell : null,
         source: batch.source,
         server: batch.server,
         bid: item.bid > 0 ? item.bid : null,
         ask: item.ask > 0 ? item.ask : null,
         observedAt: String(batch.generatedAt),
-      }),
-    );
+      });
+    });
     await this.instruments.upsert(rows, {
       conflictPaths: ['source', 'server', 'symbol'],
       skipUpdateIfNoValuesChanged: true,
@@ -271,6 +336,8 @@ export class MarketDataService {
       source: batch.source,
       server: batch.server,
       generatedAt: batch.generatedAt,
+      accountCurrency: batch.accountCurrency,
+      accountLeverage: batch.accountLeverage,
     };
   }
 
@@ -293,12 +360,27 @@ export class MarketDataService {
       currencyBase: row.currencyBase,
       currencyProfit: row.currencyProfit,
       currencyMargin: row.currencyMargin,
+      accountCurrency: row.accountCurrency,
+      accountLeverage: row.accountLeverage,
       tradeMode: row.tradeMode,
       digits: row.digits,
       point: row.point,
       contractSize: row.contractSize,
       tickSize: row.tickSize,
       tickValue: row.tickValue,
+      calculationMode: row.calculationMode,
+      volumeMin: row.volumeMin,
+      volumeMax: row.volumeMax,
+      volumeStep: row.volumeStep,
+      volumeLimit: row.volumeLimit,
+      marginInitial: row.marginInitial,
+      marginMaintenance: row.marginMaintenance,
+      minimumMarginBuy: row.minimumMarginBuy,
+      minimumMarginSell: row.minimumMarginSell,
+      minimumOnePercentLossBuy: row.minimumOnePercentLossBuy,
+      minimumOnePercentLossSell: row.minimumOnePercentLossSell,
+      tradeStopsLevel: row.tradeStopsLevel,
+      tradeFreezeLevel: row.tradeFreezeLevel,
       swapMode: row.swapMode,
       swapLong: row.swapLong,
       swapShort: row.swapShort,
@@ -309,6 +391,161 @@ export class MarketDataService {
       observedAt: Number(row.observedAt),
       updatedAt: row.updatedAt.toISOString(),
     }));
+  }
+
+  async researchPreflight(query: ResearchPreflightQueryDto) {
+    const symbols = FROZEN_RESEARCH_UNIVERSE.map((item) => item.symbol);
+    const catalogRows = await this.instruments.find({
+      where: { symbol: In(symbols) },
+    });
+    const catalogBySymbol = new Map(catalogRows.map((row) => [row.symbol, row]));
+
+    const candleRows: Array<{
+      symbol: string;
+      timeframe: string;
+      candleCount: string;
+      oldestOpenTime: string;
+      newestOpenTime: string;
+    }> = await this.candles
+      .createQueryBuilder('candle')
+      .select('candle.symbol', 'symbol')
+      .addSelect('candle.timeframe', 'timeframe')
+      .addSelect('COUNT(*)', 'candleCount')
+      .addSelect('MIN(candle.openTime)', 'oldestOpenTime')
+      .addSelect('MAX(candle.openTime)', 'newestOpenTime')
+      .where('candle.symbol IN (:...symbols)', { symbols })
+      .andWhere('candle.timeframe IN (:...timeframes)', {
+        timeframes: RESEARCH_REQUIRED_TIMEFRAMES.map((item) => item.timeframe),
+      })
+      .groupBy('candle.symbol')
+      .addGroupBy('candle.timeframe')
+      .getRawMany();
+
+    const spreadRows: Array<{
+      symbol: string;
+      timeframe: string;
+      spreadCount: string;
+    }> = await this.spreads
+      .createQueryBuilder('spread')
+      .select('spread.symbol', 'symbol')
+      .addSelect('spread.timeframe', 'timeframe')
+      .addSelect('COUNT(*)', 'spreadCount')
+      .where('spread.symbol IN (:...symbols)', { symbols })
+      .andWhere('spread.timeframe IN (:...timeframes)', {
+        timeframes: RESEARCH_REQUIRED_TIMEFRAMES.map((item) => item.timeframe),
+      })
+      .groupBy('spread.symbol')
+      .addGroupBy('spread.timeframe')
+      .getRawMany();
+
+    const candleByKey = new Map(
+      candleRows.map((row) => [`${row.symbol}|${row.timeframe}`, row]),
+    );
+    const spreadByKey = new Map(
+      spreadRows.map((row) => [
+        `${row.symbol}|${row.timeframe}`,
+        Number(row.spreadCount),
+      ]),
+    );
+    const now = Math.floor(Date.now() / 1000);
+    const latestAllowedAge = 8 * 24 * 60 * 60;
+
+    const instruments = FROZEN_RESEARCH_UNIVERSE.map((frozen) => {
+      const catalog = catalogBySymbol.get(frozen.symbol) ?? null;
+      const history = RESEARCH_REQUIRED_TIMEFRAMES.map((requirement) => {
+        const key = `${frozen.symbol}|${requirement.timeframe}`;
+        const row = candleByKey.get(key);
+        const candleCount = row ? Number(row.candleCount) : 0;
+        const spreadCount = spreadByKey.get(key) ?? 0;
+        const oldestOpenTime = row ? Number(row.oldestOpenTime) : null;
+        const newestOpenTime = row ? Number(row.newestOpenTime) : null;
+        const spreadPercent = spreadCoveragePercent(candleCount, spreadCount);
+        const checks = {
+          minimumBars: candleCount >= requirement.minimumBars,
+          startCoverage:
+            oldestOpenTime !== null &&
+            oldestOpenTime <= RESEARCH_HISTORY_START + 31 * 24 * 60 * 60,
+          recentCoverage:
+            newestOpenTime !== null && newestOpenTime >= now - latestAllowedAge,
+          spreadCoverage:
+            spreadPercent >= MINIMUM_SPREAD_COVERAGE_PERCENT,
+        };
+        return {
+          timeframe: requirement.timeframe,
+          minimumBars: requirement.minimumBars,
+          candleCount,
+          spreadCount,
+          spreadCoveragePercent: spreadPercent,
+          oldestOpenTime,
+          newestOpenTime,
+          checks,
+          ready: Object.values(checks).every(Boolean),
+        };
+      });
+      const catalogReady =
+        catalog !== null &&
+        catalog.tradeMode === 4 &&
+        catalog.accountCurrency.length > 0 &&
+        catalog.accountLeverage > 0 &&
+        catalog.volumeMin > 0 &&
+        catalog.volumeStep > 0;
+      const execution = assessMinimumTradeFeasibility({
+        accountBalance: query.accountBalance,
+        minimumMarginBuy: catalog?.minimumMarginBuy ?? null,
+        minimumMarginSell: catalog?.minimumMarginSell ?? null,
+        minimumOnePercentLossBuy:
+          catalog?.minimumOnePercentLossBuy ?? null,
+        minimumOnePercentLossSell:
+          catalog?.minimumOnePercentLossSell ?? null,
+      });
+      return {
+        ...frozen,
+        catalogReady,
+        volumeMin: catalog?.volumeMin ?? null,
+        volumeStep: catalog?.volumeStep ?? null,
+        accountCurrency: catalog?.accountCurrency ?? null,
+        accountLeverage: catalog?.accountLeverage ?? null,
+        execution,
+        history,
+        dataReady: catalogReady && history.every((item) => item.ready),
+      };
+    });
+
+    const classCounts = Object.fromEntries(
+      (['fx', 'commodity', 'equity-index'] as const).map((assetClass) => [
+        assetClass,
+        instruments.filter((item) => item.assetClass === assetClass).length,
+      ]),
+    );
+    const dataReadyCount = instruments.filter((item) => item.dataReady).length;
+    const executableCount = instruments.filter(
+      (item) => item.execution.executableAtMinimumVolume,
+    ).length;
+
+    return {
+      phase: '5.8B',
+      preregistered: true,
+      accountBalance: query.accountBalance,
+      universeSize: instruments.length,
+      classCounts,
+      requirements: {
+        historyStart: RESEARCH_HISTORY_START,
+        timeframes: RESEARCH_REQUIRED_TIMEFRAMES,
+        minimumSpreadCoveragePercent: MINIMUM_SPREAD_COVERAGE_PERCENT,
+        maximumMarginSharePercent: 50,
+        maximumOnePercentMoveRiskPercent: 5,
+      },
+      summary: {
+        catalogReadyCount: instruments.filter((item) => item.catalogReady).length,
+        dataReadyCount,
+        executableAtMinimumVolumeCount: executableCount,
+        researchReady: dataReadyCount === instruments.length,
+        liveValidationReady:
+          dataReadyCount === instruments.length &&
+          executableCount === instruments.length,
+      },
+      instruments,
+    };
   }
 
   async backfillEconomicEvents(batch: EconomicEventBackfillDto) {

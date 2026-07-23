@@ -64,6 +64,58 @@ export class InstrumentCatalogItemDto {
 
   @IsInt()
   @Min(0)
+  calculationMode!: number;
+
+  @IsNumber()
+  @Min(0)
+  volumeMin!: number;
+
+  @IsNumber()
+  @Min(0)
+  volumeMax!: number;
+
+  @IsNumber()
+  @Min(0)
+  volumeStep!: number;
+
+  @IsNumber()
+  @Min(0)
+  volumeLimit!: number;
+
+  @IsNumber()
+  @Min(0)
+  marginInitial!: number;
+
+  @IsNumber()
+  @Min(0)
+  marginMaintenance!: number;
+
+  @IsNumber()
+  @Min(0)
+  minimumMarginBuy!: number;
+
+  @IsNumber()
+  @Min(0)
+  minimumMarginSell!: number;
+
+  @IsNumber()
+  @Min(0)
+  minimumOnePercentLossBuy!: number;
+
+  @IsNumber()
+  @Min(0)
+  minimumOnePercentLossSell!: number;
+
+  @IsInt()
+  @Min(0)
+  tradeStopsLevel!: number;
+
+  @IsInt()
+  @Min(0)
+  tradeFreezeLevel!: number;
+
+  @IsInt()
+  @Min(0)
   swapMode!: number;
 
   @IsNumber()
@@ -99,6 +151,15 @@ export class InstrumentCatalogBatchDto {
   @IsInt()
   @Min(0)
   generatedAt!: number;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(16)
+  accountCurrency!: string;
+
+  @IsInt()
+  @Min(1)
+  accountLeverage!: number;
 
   @IsArray()
   @ArrayMinSize(1)

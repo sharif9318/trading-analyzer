@@ -6,6 +6,7 @@ import {
   IsInt,
   IsNotEmpty,
   IsNumber,
+  IsOptional,
   IsString,
   MaxLength,
   Min,
@@ -32,6 +33,11 @@ export class HistoricalCandleDto {
   @IsInt()
   @Min(0)
   tickVolume!: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  spreadPoints?: number;
 }
 
 export class HistoricalBackfillDto {
@@ -58,6 +64,11 @@ export class HistoricalBackfillDto {
   @IsInt()
   @Min(0)
   generatedAt!: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(Number.EPSILON)
+  point?: number;
 
   @IsArray()
   @ArrayMinSize(1)

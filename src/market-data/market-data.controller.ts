@@ -19,6 +19,7 @@ import { HistoricalBackfillDto } from './dto/historical-backfill.dto';
 import { InstrumentCatalogBatchDto } from './dto/instrument-catalog.dto';
 import { MarketSnapshotBatchDto } from './dto/market-snapshot.dto';
 import { QualityQueryDto } from './dto/quality-query.dto';
+import { ResearchPreflightQueryDto } from './dto/research-preflight-query.dto';
 import { SpreadBackfillDto } from './dto/spread-backfill.dto';
 import { TradingEconomicsBackfillDto } from './dto/trading-economics-backfill.dto';
 import { MarketDataService } from './market-data.service';
@@ -105,6 +106,11 @@ export class MarketDataController {
     return {
       instruments: await this.marketDataService.instrumentCatalog(),
     };
+  }
+
+  @Get('research-universe/preflight')
+  async researchPreflight(@Query() query: ResearchPreflightQueryDto) {
+    return this.marketDataService.researchPreflight(query);
   }
 
   @Post('economic-events/backfill')
